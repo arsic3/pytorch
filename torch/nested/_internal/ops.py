@@ -433,7 +433,7 @@ def jagged_torch_function(func, *args, **kwargs):
     if func.__name__ == "share_memory_":
         nt = args[0]
 
-        if nt.is_cuda or nt.is_xpu:
+        if not nt.is_cpu:
             return nt
 
         names, _ = nt.__tensor_flatten__()
@@ -448,8 +448,8 @@ def jagged_torch_function(func, *args, **kwargs):
     if func.__name__ == "is_shared":
         nt = args[0]
 
-        if nt.is_cuda or nt.is_xpu:
-            return False
+        if not nt.is_cpu:
+            return True
 
         names, _ = nt.__tensor_flatten__()
         if not names:
