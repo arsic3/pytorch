@@ -664,9 +664,12 @@ print(torch.xpu.is_initialized())
             self.assertIs(type(copy), type(original))
             self.assertEqual(copy.get_device(), original.get_device())
 
-    def test_share_memory(self):
+    def test_is_shared(self):
         t = torch.randn(5, 5, device="xpu")
         self.assertTrue(t.is_shared())
+
+    def test_share_memory(self):
+        t = torch.randn(5, 5, device="xpu")
         result = t.share_memory_()
         self.assertIs(result, t)
 

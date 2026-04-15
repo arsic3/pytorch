@@ -1043,11 +1043,6 @@ if __name__ == "__main__":
         t = torch.randn(5, 5).cuda()
         self.assertTrue(t.is_shared())
 
-    @unittest.skipIf(not torch.xpu.is_available(), "XPU not available")
-    def test_is_shared_xpu(self):
-        t = torch.randn(5, 5).xpu()
-        self.assertTrue(t.is_shared())
-
     @unittest.skipIf(sys.platform != "linux", "Only runs on Linux; requires prctl(2)")
     def test_set_thread_name(self):
         name = "test name"
