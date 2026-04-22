@@ -278,22 +278,34 @@ inline bool check_attn_mask_shape(sdp_params const& params, bool debug) {
   auto qSize = params.query.sym_size(2);
   auto kvSize = params.key.sym_size(2);
   auto num_head = params.query.sym_size(1);
-  if (attn_mask.value().sym_size(-2) != qSize && attn_mask.value().sym_size(-2) != 1) {
+
+  // Use maybe_as_int() for comparisons to avoid guarding
+  // on unbacked symbolic ints (e.g. data-dependent dims during torch.export).
+  auto mask_seq = attn_mask.value().sym_size(-2);
+  if (mask_seq != qSize &&
+      mask_seq.maybe_as_int() != std::make_optional<int64_t>(1)) {
     return false;
   }
-  if (attn_mask.value().sym_size(-1) != kvSize && attn_mask.value().sym_size(-1) != 1) {
+  auto mask_kv = attn_mask.value().sym_size(-1);
+  if (mask_kv != kvSize &&
+      mask_kv.maybe_as_int() != std::make_optional<int64_t>(1)) {
     return false;
   }
   if (attn_mask.value().dim() == 2) {
     return true;
   } else if (attn_mask.value().dim() == 4) {
-    if ((attn_mask.value().sym_size(0) == 1 || attn_mask.value().sym_size(0) == batchSize)
-        && (attn_mask.value().sym_size(1) == 1 || attn_mask.value().sym_size(1) == num_head)) {
+    auto mask_b = attn_mask.value().sym_size(0);
+    auto mask_h = attn_mask.value().sym_size(1);
+    if ((mask_b == batchSize ||
+         mask_b.maybe_as_int() == std::make_optional<int64_t>(1)) &&
+        (mask_h == num_head ||
+         mask_h.maybe_as_int() == std::make_optional<int64_t>(1))) {
       return true;
     }
   }
   if (debug) {
-    TORCH_WARN("Please use the following attn mask shapes: ",
+    TORCH_WARN(
+        "Please use the following attn mask shapes: ",
         "2d - ({Q_seq_len, 1}  x {KV_seq_len, 1}); ",
         "4d - ({Batch, 1} x {Num_heads, 1} x {Q_seq_len, 1}  x {KV_seq_len, 1})");
   }
