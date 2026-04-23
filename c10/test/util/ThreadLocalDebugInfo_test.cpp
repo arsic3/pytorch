@@ -3,6 +3,7 @@
 #include <gtest/gtest.h>
 
 #include <memory>
+#include <set>
 #include <string_view>
 
 namespace c10 {
@@ -73,6 +74,21 @@ TEST(ThreadLocalDebugInfo, PeekThrowsOnMismatch) {
   EXPECT_THROW(ThreadLocalDebugInfo::_peek(kKind2), c10::Error);
 
   ThreadLocalDebugInfo::_pop(kKind1);
+}
+
+TEST(DebugInfoKind, CtorThrowsOnNull) {
+  EXPECT_THROW({ const DebugInfoKind kKind1(nullptr); }, c10::Error);
+  const std::string_view* const kNullKindStr = nullptr;
+  EXPECT_THROW(const DebugInfoKind kKind2(kNullKindStr), c10::Error);
+}
+
+TEST(DebugInfoKind, CanBePutInSet) {
+  std::set<DebugInfoKind> kinds;
+  kinds.insert(DebugInfoKind::PRODUCER_INFO);
+  kinds.insert(DebugInfoKind::PROFILER_STATE);
+  EXPECT_EQ(kinds.size(), 2);
+  EXPECT_TRUE(kinds.contains(DebugInfoKind::PRODUCER_INFO));
+  EXPECT_TRUE(kinds.contains(DebugInfoKind::PROFILER_STATE));
 }
 
 }  // namespace

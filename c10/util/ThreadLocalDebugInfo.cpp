@@ -9,27 +9,6 @@
 
 namespace c10 {
 
-constexpr std::string_view kProducerInfoName = "PRODUCER_INFO";
-constexpr std::string_view kMobileRuntimeInfoName = "MOBILE_RUNTIME_INFO";
-constexpr std::string_view kProfilerStateName = "PROFILER_STATE";
-constexpr std::string_view kInferenceContextName = "INFERENCE_CONTEXT";
-constexpr std::string_view kParamCommsInfoName = "PARAM_COMMS_INFO";
-constexpr std::string_view kTestInfoName = "TEST_INFO";
-constexpr std::string_view kTestInfo2Name = "TEST_INFO_2";
-
-const DebugInfoKind DebugInfoKind::PRODUCER_INFO(&kProducerInfoName);
-const DebugInfoKind DebugInfoKind::MOBILE_RUNTIME_INFO(&kMobileRuntimeInfoName);
-const DebugInfoKind DebugInfoKind::PROFILER_STATE(&kProfilerStateName);
-const DebugInfoKind DebugInfoKind::INFERENCE_CONTEXT(&kInferenceContextName);
-const DebugInfoKind DebugInfoKind::PARAM_COMMS_INFO(&kParamCommsInfoName);
-const DebugInfoKind DebugInfoKind::TEST_INFO(&kTestInfoName);
-const DebugInfoKind DebugInfoKind::TEST_INFO_2(&kTestInfo2Name);
-
-DebugInfoKind::DebugInfoKind(DebugInfoKind::value_type value) : value_(value) {
-  CHECK(value_ != nullptr)  // Crash OK as this indicates a bug in C++ code.
-      << "DebugInfoKind must be initialized with a non-null pointer.";
-}
-
 std::ostream& operator<<(std::ostream& os, const DebugInfoKind& kind) {
   return os << (kind.value_ == nullptr ? "<uninitialized>" : *kind.value_);
 }
@@ -116,4 +95,4 @@ DebugInfoGuard::DebugInfoGuard(std::shared_ptr<ThreadLocalDebugInfo> info) {
   active_ = true;
 }
 
-} // namespace c10
+}  // namespace c10

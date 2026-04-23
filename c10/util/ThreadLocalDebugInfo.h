@@ -1,11 +1,10 @@
 #pragma once
 
 #include <c10/macros/Export.h>
+#include <c10/util/Exception.h>
 
-#include <cstddef>
-#include <cstdint>
+#include <iosfwd>
 #include <memory>
-#include <ostream>
 #include <string_view>
 
 namespace c10 {
@@ -22,16 +21,30 @@ class C10_API DebugInfoKind {
   // duration. The pointer address is used as the identifier for the slot.
   // The string itself is only used for debugging purposes and should be
   // descriptive of the slot's purpose and ideally (but not required) be unique.
-  using value_type = const std::string_view*;  // Must be non-null.
+  using value_type = const std::string_view*;
 
  public:
   // Creates an uninitialized DebugInfoKind.
-  DebugInfoKind() = default;
+  constexpr DebugInfoKind() = default;
 
-  // Creates a DebugInfoKind with the given identity.
-  explicit DebugInfoKind(value_type value);
+  // Creates a DebugInfoKind with the given identity, which must not be null.
+  // If called with a null value in a constexpr context, will trigger a compile
+  // time error. If called with a null value in a non-constexpr context, will
+  // trigger a runtime exception.
+  explicit constexpr DebugInfoKind(value_type value) : value_(value) {
+    if (value == nullptr) {
+      // Since this function is not constexpr, it will trigger a compile-time
+      // error if the DebugInfoKind() ctor is called in a constexpr context
+      // with a null value.
+      DebugInfoKind_ctor_parameter_must_not_be_null();
+    }
+  }
 
   // Predefined DebugInfoKinds for common use cases.
+  // C++ doesn't allow declaring constexpr variables of an incomplete type,
+  // so these are declared as const. However, they are defined as constexpr
+  // outside the class, where the DebugInfoKind type is fully defined. We
+  // do this for backward compatibility.
   static const DebugInfoKind PRODUCER_INFO;
   static const DebugInfoKind MOBILE_RUNTIME_INFO;
   static const DebugInfoKind PROFILER_STATE;
@@ -40,18 +53,57 @@ class C10_API DebugInfoKind {
   static const DebugInfoKind TEST_INFO;    // used only in tests
   static const DebugInfoKind TEST_INFO_2;  // used only in tests
 
-  constexpr bool operator==(const DebugInfoKind& other) const {
+  // Comparison operators. These allow putting DebugInfoKind in containers like
+  // std::set and std::map.
+  constexpr bool operator==(const DebugInfoKind other) const {
     return value_ == other.value_;
   }
-  constexpr bool operator!=(const DebugInfoKind& other) const {
+  constexpr bool operator!=(const DebugInfoKind other) const {
     return value_ != other.value_;
+  }
+  constexpr bool operator<(const DebugInfoKind other) const {
+    return value_ < other.value_;
   }
 
   friend std::ostream& operator<<(std::ostream& os, const DebugInfoKind& kind);
 
  private:
+  // Doesn't compile in a constexpr context; throws in a non-constexpr context.
+  // The function name is intentionally verbose to make the compiler error
+  // more readable.
+  [[noreturn]] static inline void
+  DebugInfoKind_ctor_parameter_must_not_be_null() {
+    TORCH_INTERNAL_ASSERT(
+        false, "DebugInfoKind must be initialized with a non-null pointer.");
+  }
+
+  // Names for predefined DebugInfoKinds.
+  inline static constexpr std::string_view kProducerInfoName = "PRODUCER_INFO";
+  inline static constexpr std::string_view kMobileRuntimeInfoName =
+      "MOBILE_RUNTIME_INFO";
+  inline static constexpr std::string_view kProfilerStateName =
+      "PROFILER_STATE";
+  inline static constexpr std::string_view kInferenceContextName =
+      "INFERENCE_CONTEXT";
+  inline static constexpr std::string_view kParamCommsInfoName =
+      "PARAM_COMMS_INFO";
+  inline static constexpr std::string_view kTestInfoName = "TEST_INFO";
+  inline static constexpr std::string_view kTestInfo2Name = "TEST_INFO_2";
+
   value_type value_ = nullptr;
 };
+
+inline constexpr DebugInfoKind DebugInfoKind::PRODUCER_INFO(&kProducerInfoName);
+inline constexpr DebugInfoKind DebugInfoKind::MOBILE_RUNTIME_INFO(
+    &kMobileRuntimeInfoName);
+inline constexpr DebugInfoKind DebugInfoKind::PROFILER_STATE(
+    &kProfilerStateName);
+inline constexpr DebugInfoKind DebugInfoKind::INFERENCE_CONTEXT(
+    &kInferenceContextName);
+inline constexpr DebugInfoKind DebugInfoKind::PARAM_COMMS_INFO(
+    &kParamCommsInfoName);
+inline constexpr DebugInfoKind DebugInfoKind::TEST_INFO(&kTestInfoName);
+inline constexpr DebugInfoKind DebugInfoKind::TEST_INFO_2(&kTestInfo2Name);
 
 class C10_API DebugInfoBase {
  public:
@@ -117,4 +169,4 @@ class C10_API DebugInfoGuard {
   std::shared_ptr<ThreadLocalDebugInfo> prev_info_ = nullptr;
 };
 
-} // namespace c10
+}  // namespace c10
