@@ -1768,6 +1768,17 @@ class RangeIteratorVariable(IteratorVariable):
         """Range iterators are their own iterator."""
         return self
 
+    def call_method(
+        self,
+        tx: "InstructionTranslator",
+        name: str,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
+    ) -> VariableTracker:
+        if name == "__next__":
+            return self.next_variable(tx)
+        return super().call_method(tx, name, args, kwargs)
+
     def call_obj_hasattr(
         self, tx: "InstructionTranslator", name: str
     ) -> ConstantVariable:

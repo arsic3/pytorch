@@ -283,6 +283,17 @@ class IteratorVariable(VariableTracker):
         """Iterators are their own iterator."""
         return self
 
+    def call_method(
+        self,
+        tx: "InstructionTranslator",
+        name: str,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
+    ) -> VariableTracker:
+        if name == "__next__":
+            return self.next_variable(tx)
+        return super().call_method(tx, name, args, kwargs)
+
 
 class RepeatIteratorVariable(IteratorVariable):
     def __init__(self, item: VariableTracker, **kwargs: Any) -> None:
@@ -644,10 +655,7 @@ class DictViewIterator(IteratorVariable):
             assert self.view_type == "items"
             self._iter = iter(items.items())  # type: ignore[bad-assignment]
 
-    def tp_iternext_impl(self, tx: "InstructionTranslator") -> VariableTracker:
-        # dictiter_iternextitem: https://github.com/python/cpython/blob/v3.13.3/Objects/dictobject.c#L5538-L5578
-        # dictiter_iternextkey: https://github.com/python/cpython/blob/v3.13.3/Objects/dictobject.c#L5125-L5144
-        # dictiter_iternextvalue: https://github.com/python/cpython/blob/v3.13.3/Objects/dictobject.c#L5248-L5267
+    def next_variable(self, tx: "InstructionTranslator") -> VariableTracker:
         try:
             item = next(self._iter)
 

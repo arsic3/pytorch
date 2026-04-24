@@ -1254,7 +1254,9 @@ class LocalGeneratorObjectVariable(VariableTracker):
         args: list[VariableTracker],
         kwargs: dict[str, VariableTracker],
     ) -> VariableTracker:
-        if name == "send":
+        if name == "__next__":
+            return self.next_variable(tx)
+        elif name == "send":
             # Sends a value into the generator function. Returns the next value
             # yielded by the generator, or raises StopIteration if the generator
             # exits without yielding another value
