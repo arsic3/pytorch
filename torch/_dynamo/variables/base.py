@@ -667,6 +667,8 @@ class VariableTracker(metaclass=VariableTrackerMeta):
             return generic_len(tx, self)
         elif name == "__iter__" and not args and not kwargs:
             return self.tp_iter_impl(tx)
+        elif name == "__next__" and not args and not kwargs:
+            return self.tp_iternext_impl(tx)
         elif (
             name == "__getattr__"
             and len(args) == 1
