@@ -82,6 +82,14 @@ TEST(DebugInfoKind, CtorThrowsOnNull) {
   EXPECT_THROW(const DebugInfoKind kKind2(kNullKindStr), c10::Error);
 }
 
+TEST(DebugInfoKind, DifferentPointersWithSameStringAreDifferentKinds) {
+  static constexpr std::string_view kKindStr1 = "CustomKind";
+  static constexpr std::string_view kKindStr2 = "CustomKind";
+  const DebugInfoKind kKind1(&kKindStr1);
+  const DebugInfoKind kKind2(&kKindStr2);
+  EXPECT_NE(kKind1, kKind2);
+}
+
 TEST(DebugInfoKind, CanBePutInSet) {
   std::set<DebugInfoKind> kinds;
   kinds.insert(DebugInfoKind::PRODUCER_INFO);

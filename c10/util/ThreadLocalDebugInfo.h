@@ -10,24 +10,37 @@
 namespace c10 {
 
 // Identifies a slot in ThreadLocalDebugInfo for storing a specific type
-// of python-thread-local state.
+// of thread-local state.
 //
 // This class is trivial to copy and move, and is cheap to construct and
-// destroy. It mimics the behavior of an enum class for backward compatibility
-// with existing uses.
+// destroy.
+//
+// Example:
+//
+//   inline constexpr std::string_view kMyCustomInfoName = "MY_CUSTOM_INFO";
+//   inline constexpr DebugInfoKind kMyCustomInfo(&kMyCustomInfoName);
+//   ...
+//   ThreadLocalDebugInfo::_push(kMyCustomInfo, my_custom_info_shared_ptr);
+//   ...
+//   const DebugInfoBase* info = ThreadLocalDebugInfo::get(kMyCustomInfo);
+//   ...
+//   ThreadLocalDebugInfo::_pop(kMyCustomInfo);
 class C10_API DebugInfoKind {
  private:
-  // Must be a non-null pointer to a string literal with static storage
-  // duration. The pointer address is used as the identifier for the slot.
-  // The string itself is only used for debugging purposes and should be
-  // descriptive of the slot's purpose and ideally (but not required) be unique.
+  // Must be a non-null pointer to a string_view literal with static storage
+  // duration.
   using value_type = const std::string_view*;
 
  public:
   // Creates an uninitialized DebugInfoKind.
   constexpr DebugInfoKind() = default;
 
-  // Creates a DebugInfoKind with the given identity, which must not be null.
+  // Creates a DebugInfoKind with the given identity, which must be a non-null
+  // pointer to a string_view literal with static storage duration. The pointer
+  // address (not the string itself) is used as the identifier for the slot. The
+  // string itself is only used for debugging purposes and should be descriptive
+  // of the slot's purpose and ideally (but not required) be unique.
+  //
   // If called with a null value in a constexpr context, will trigger a compile
   // time error. If called with a null value in a non-constexpr context, will
   // trigger a runtime exception.
@@ -44,7 +57,7 @@ class C10_API DebugInfoKind {
   // C++ doesn't allow declaring constexpr variables of an incomplete type,
   // so these are declared as const. However, they are defined as constexpr
   // outside the class, where the DebugInfoKind type is fully defined. We
-  // do this for backward compatibility.
+  // do this to ensure these are available at static initialization time.
   static const DebugInfoKind PRODUCER_INFO;
   static const DebugInfoKind MOBILE_RUNTIME_INFO;
   static const DebugInfoKind PROFILER_STATE;
