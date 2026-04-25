@@ -1,5 +1,4 @@
 #include <c10/util/Exception.h>
-#include <c10/util/Logging.h>
 #include <c10/util/ThreadLocal.h>
 #include <c10/util/ThreadLocalDebugInfo.h>
 
