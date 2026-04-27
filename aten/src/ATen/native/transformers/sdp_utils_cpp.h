@@ -279,16 +279,25 @@ inline bool check_attn_mask_shape(sdp_params const& params, bool debug) {
   auto kvSize = params.key.sym_size(2);
   auto num_head = params.query.sym_size(1);
 
-  // Use maybe_as_int() for comparisons to avoid guarding
-  // on unbacked symbolic ints (e.g. data-dependent dims during torch.export).
-  auto mask_seq = attn_mask.value().sym_size(-2);
-  if (mask_seq != qSize &&
-      mask_seq.maybe_as_int() != std::make_optional<int64_t>(1)) {
+  // Helper to check if a mask dim is compatible with a target dim.
+  // Compatible means: symbolically equal, or the mask dim is concretely 1
+  // (broadcast). Returns false (conservatively reject) when neither can be
+  // determined without guarding on unbacked symbolic ints.
+  auto dim_compatible = [](const c10::SymInt& mask_dim,
+                           const c10::SymInt& target_dim) -> bool {
+    if (TORCH_STATICALLY_KNOWN_TRUE(mask_dim == target_dim)) {
+      return true;
+    }
+    auto mask_int = mask_dim.maybe_as_int();
+    return mask_int.has_value() && *mask_int == 1;
+  };
+
+  auto mask_qsize = attn_mask.value().sym_size(-2);
+  if (!dim_compatible(mask_qsize, qSize)) {
     return false;
   }
-  auto mask_kv = attn_mask.value().sym_size(-1);
-  if (mask_kv != kvSize &&
-      mask_kv.maybe_as_int() != std::make_optional<int64_t>(1)) {
+  auto mask_kvsize = attn_mask.value().sym_size(-1);
+  if (!dim_compatible(mask_kvsize, kvSize)) {
     return false;
   }
   if (attn_mask.value().dim() == 2) {
@@ -296,10 +305,8 @@ inline bool check_attn_mask_shape(sdp_params const& params, bool debug) {
   } else if (attn_mask.value().dim() == 4) {
     auto mask_b = attn_mask.value().sym_size(0);
     auto mask_h = attn_mask.value().sym_size(1);
-    if ((mask_b == batchSize ||
-         mask_b.maybe_as_int() == std::make_optional<int64_t>(1)) &&
-        (mask_h == num_head ||
-         mask_h.maybe_as_int() == std::make_optional<int64_t>(1))) {
+    if (dim_compatible(mask_b, batchSize) &&
+        dim_compatible(mask_h, num_head)) {
       return true;
     }
   }
