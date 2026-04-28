@@ -1191,9 +1191,9 @@ template<typename T, int D>
     const device uint*    cu_seqlens_k [[buffer(6)]],   // [B+1]
     const constant uint&  total_q      [[buffer(7)]],
     const constant uint&  total_k      [[buffer(8)]],
-    const constant float& sc           [[buffer(9)]],
-    const constant bool&  ic           [[buffer(10)]],
-    const constant uint&  gqa          [[buffer(11)]],  // H / kvH
+    const constant float& sc           [[buffer(9)]],   // attention scale (1/sqrt(D))
+    const constant bool&  ic           [[buffer(10)]],  // is_causal
+    const constant uint&  gqa          [[buffer(11)]],  // H / kvH  (1 for MHA)
     const constant int&   wnd_left     [[buffer(12)]],  // left  window (-1 = unlimited)
     const constant int&   wnd_right    [[buffer(13)]],  // right window (-1 = unlimited)
     const device float*   alibi        [[buffer(14)]],  // [H] slopes, or dummy if no alibi
@@ -1363,9 +1363,9 @@ template<typename T, int D>
     const device uint*    cu_seqlens_k [[buffer(8)]],   // [B+1]
     const constant uint&  total_q      [[buffer(9)]],
     const constant uint&  total_k      [[buffer(10)]],
-    const constant float& sc           [[buffer(11)]],
-    const constant bool&  ic           [[buffer(12)]],
-    const constant uint&  gqa          [[buffer(13)]],  // H / kvH
+    const constant float& sc           [[buffer(11)]],  // attention scale (1/sqrt(D))
+    const constant bool&  ic           [[buffer(12)]],  // is_causal
+    const constant uint&  gqa          [[buffer(13)]],  // H / kvH  (1 for MHA)  // H / kvH
     const constant int&   wnd_left     [[buffer(14)]],
     const constant int&   wnd_right    [[buffer(15)]],
     const device float*   alibi        [[buffer(16)]],
@@ -1496,9 +1496,9 @@ template<typename T, int D>
     const device uint*    cu_seqlens_k [[buffer(9)]],   // [B+1]
     const constant uint&  total_q      [[buffer(10)]],
     const constant uint&  total_k      [[buffer(11)]],
-    const constant float& sc           [[buffer(12)]],
-    const constant bool&  ic           [[buffer(13)]],
-    const constant uint&  gqa          [[buffer(14)]],  // H / kvH
+    const constant float& sc           [[buffer(12)]],  // attention scale (1/sqrt(D))
+    const constant bool&  ic           [[buffer(13)]],  // is_causal
+    const constant uint&  gqa          [[buffer(14)]],  // H / kvH  (1 for MHA)  // H / kvH
     const constant int&   wnd_left     [[buffer(15)]],
     const constant int&   wnd_right    [[buffer(16)]],
     const device float*   alibi        [[buffer(17)]],  // [H] slopes, or dummy
@@ -1625,7 +1625,7 @@ template<typename T, int D>
 
 // ── varlen explicit instantiation ─────────────────────────────────────────────
 
-#define INST_FLASH_VARLEN_FWD(T, D) \
+#define INSTANTIATE_FLASH_VARLEN_FWD(T, D) \
   template [[host_name("flash_attn_varlen_fwd_" #T "_" #D)]] [[kernel]] \
   void flash_attn_varlen_fwd<T, D>( \
       const device T*       Q            [[buffer(0)]],   \
@@ -1647,7 +1647,7 @@ template<typename T, int D>
       uint3 tgid [[threadgroup_position_in_grid]],        \
       uint  tid  [[thread_index_in_threadgroup]]);
 
-#define INST_FLASH_VARLEN_BWD_PRE(T, D) \
+#define INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, D) \
   template [[host_name("flash_attn_varlen_bwd_pre_" #T "_" #D)]] [[kernel]] \
   void flash_attn_varlen_bwd_preprocess<T, D>( \
       const device T*       dO           [[buffer(0)]],  \
@@ -1658,7 +1658,7 @@ template<typename T, int D>
       uint3 tgid [[threadgroup_position_in_grid]],       \
       uint  tid  [[thread_index_in_threadgroup]]);
 
-#define INST_FLASH_VARLEN_BWD_DQ(T, D) \
+#define INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, D) \
   template [[host_name("flash_attn_varlen_bwd_dq_" #T "_" #D)]] [[kernel]] \
   void flash_attn_varlen_bwd_dq<T, D>( \
       const device T*       Q            [[buffer(0)]],   \
@@ -1682,7 +1682,7 @@ template<typename T, int D>
       uint3 tgid [[threadgroup_position_in_grid]],        \
       uint  tid  [[thread_index_in_threadgroup]]);
 
-#define INST_FLASH_VARLEN_BWD_DKDV(T, D) \
+#define INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, D) \
   template [[host_name("flash_attn_varlen_bwd_dkdv_" #T "_" #D)]] [[kernel]] \
   void flash_attn_varlen_bwd_dkdv<T, D>( \
       const device T*       Q            [[buffer(0)]],   \
@@ -1707,16 +1707,16 @@ template<typename T, int D>
       uint3 tgid [[threadgroup_position_in_grid]],        \
       uint  tid  [[thread_index_in_threadgroup]]);
 
-#define INST_FLASH_VARLEN_ALL(T) \
-  INST_FLASH_VARLEN_FWD(T, 64)       \
-  INST_FLASH_VARLEN_FWD(T, 128)      \
-  INST_FLASH_VARLEN_BWD_PRE(T, 64)   \
-  INST_FLASH_VARLEN_BWD_PRE(T, 128)  \
-  INST_FLASH_VARLEN_BWD_DQ(T, 64)    \
-  INST_FLASH_VARLEN_BWD_DQ(T, 128)   \
-  INST_FLASH_VARLEN_BWD_DKDV(T, 64)  \
-  INST_FLASH_VARLEN_BWD_DKDV(T, 128)
+#define INSTANTIATE_FLASH_VARLEN_ALL(T) \
+  INSTANTIATE_FLASH_VARLEN_FWD(T, 64)       \
+  INSTANTIATE_FLASH_VARLEN_FWD(T, 128)      \
+  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 64)   \
+  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 128)  \
+  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 64)    \
+  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 128)   \
+  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 64)  \
+  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 128)
 
-INST_FLASH_VARLEN_ALL(float)
-INST_FLASH_VARLEN_ALL(half)
-INST_FLASH_VARLEN_ALL(bfloat)
+INSTANTIATE_FLASH_VARLEN_ALL(float)
+INSTANTIATE_FLASH_VARLEN_ALL(half)
+INSTANTIATE_FLASH_VARLEN_ALL(bfloat)

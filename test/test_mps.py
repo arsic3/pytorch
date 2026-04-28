@@ -14531,6 +14531,52 @@ class TestFlashAttentionVarlenMPS(TestCaseMPS):
     def test_varlen_alibi_fwd_d128(self):
         self._run_forward_alibi([48, 64], H=4, D=128)
 
+    def _run_backward_alibi(self, seqlens, H, D, dtype=torch.float16, causal=False):
+        total = sum(seqlens)
+        max_s = max(seqlens)
+        scale = 1.0 / (D ** 0.5)
+        torch.manual_seed(42)
+
+        q = torch.randn(total, H, D, device="mps", dtype=dtype, requires_grad=True)
+        k = torch.randn(total, H, D, device="mps", dtype=dtype, requires_grad=True)
+        v = torch.randn(total, H, D, device="mps", dtype=dtype, requires_grad=True)
+        slopes = torch.rand(H, dtype=torch.float32) * 0.5 + 0.01
+
+        qc = q.detach().cpu().float().requires_grad_(True)
+        kc = k.detach().cpu().float().requires_grad_(True)
+        vc = v.detach().cpu().float().requires_grad_(True)
+
+        cu = self._cu_seqlens(seqlens)
+
+        out, _ = self._varlen_op(
+            q, k, v, cu, cu, max_s, max_s, 0.0, causal,
+            alibi_slopes=slopes.to("mps"))
+        out.sum().backward()
+
+        ref = self._ref_forward_alibi(qc, kc, vc, seqlens, causal, scale, slopes)
+        ref.sum().backward()
+
+        tol = 2e-2 if dtype in (torch.float16, torch.bfloat16) else 1e-3
+        torch.testing.assert_close(q.grad.cpu().float(), qc.grad, atol=tol, rtol=tol,
+                                   msg=f"ALiBi dQ mismatch H={H} causal={causal}")
+        torch.testing.assert_close(k.grad.cpu().float(), kc.grad, atol=tol, rtol=tol,
+                                   msg=f"ALiBi dK mismatch H={H} causal={causal}")
+        torch.testing.assert_close(v.grad.cpu().float(), vc.grad, atol=tol, rtol=tol,
+                                   msg=f"ALiBi dV mismatch H={H} causal={causal}")
+
+    # ------------------------------------------------------------------
+    # ALiBi backward
+    # ------------------------------------------------------------------
+
+    def test_varlen_alibi_bwd_noncausal(self):
+        self._run_backward_alibi([32, 48, 16], H=4, D=64)
+
+    def test_varlen_alibi_bwd_causal(self):
+        self._run_backward_alibi([32, 48], H=4, D=64, causal=True)
+
+    def test_varlen_alibi_bwd_d128(self):
+        self._run_backward_alibi([32, 48], H=4, D=128)
+
 instantiate_parametrized_tests(TestFlashAttentionVarlenMPS)
 
 instantiate_parametrized_tests(TestFlashAttentionMPS)

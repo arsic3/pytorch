@@ -785,7 +785,7 @@ std::tuple<Tensor, Tensor> _scaled_dot_product_flash_attention_varlen_for_mps(
     std::optional<int64_t> window_size_right,
     const std::optional<Tensor>& alibi_slopes) {
   TORCH_CHECK(dropout_p == 0.0,
-    "_scaled_dot_product_flash_attention_varlen_for_mps: dropout not supported");
+    "_scaled_dot_product_flash_attention_varlen_for_mps: dropout is not supported");
   TORCH_CHECK(c10::isFloatingType(query.scalar_type()),
     "_scaled_dot_product_flash_attention_varlen_for_mps: unsupported dtype ", query.scalar_type());
   TORCH_CHECK(query.dim() == 3 && key.dim() == 3 && value.dim() == 3,
@@ -828,6 +828,8 @@ std::tuple<Tensor, Tensor> _scaled_dot_product_flash_attention_varlen_for_mps(
   const int32_t wnd_left  = window_size_left ? (int32_t)*window_size_left  : -1;
   const int32_t wnd_right = window_size_right ? (int32_t)*window_size_right : -1;
   const bool has_alibi = alibi_slopes.has_value() && alibi_slopes->defined();
+  TORCH_CHECK(!has_alibi || c10::isFloatingType(alibi_slopes->scalar_type()),
+    "_scaled_dot_product_flash_attention_varlen_for_mps: alibi_slopes must be floating-point");
   // Alibi buffer: [H] float slopes, or a 1-element dummy when unused
   auto alibi_buf = has_alibi
       ? alibi_slopes->to(at::kFloat).contiguous()
@@ -892,7 +894,7 @@ _scaled_dot_product_flash_attention_varlen_for_mps_backward(
     std::optional<int64_t> window_size_right,
     const std::optional<Tensor>& alibi_slopes) {
   TORCH_CHECK(dropout_p == 0.0,
-    "_scaled_dot_product_flash_attention_varlen_for_mps_backward: dropout not supported");
+    "_scaled_dot_product_flash_attention_varlen_for_mps_backward: dropout is not supported");
 
   const int64_t total_q = query.size(0);
   const int64_t H       = query.size(1);
@@ -929,6 +931,8 @@ _scaled_dot_product_flash_attention_varlen_for_mps_backward(
   const int32_t wnd_left  = window_size_left ? (int32_t)*window_size_left  : -1;
   const int32_t wnd_right = window_size_right ? (int32_t)*window_size_right : -1;
   const bool has_alibi = alibi_slopes.has_value() && alibi_slopes->defined();
+  TORCH_CHECK(!has_alibi || c10::isFloatingType(alibi_slopes->scalar_type()),
+    "_scaled_dot_product_flash_attention_varlen_for_mps_backward: alibi_slopes must be floating-point");
   auto alibi_buf = has_alibi
       ? alibi_slopes->to(at::kFloat).contiguous()
       : at::zeros({1}, at::TensorOptions().dtype(at::kFloat).device(query.device()));
