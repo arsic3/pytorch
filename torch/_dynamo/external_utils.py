@@ -177,6 +177,30 @@ def call_hook_from_backward_state(
     return getattr(bw_state, hook_name)(*args, **kwargs)
 
 
+class _RegisterHookTrampoline:
+    """Register a backward hook backed by a traced subgraph.
+
+    During make_fx tracing, this registers the hook on the FakeTensor.
+    The hook fires during backward tracing on the accumulated gradient,
+    so its effect is captured in the joint graph. The hook body is a
+    traced GraphModule that takes (grad, *captured_freevars) as input.
+    """
+
+    __name__ = "_RegisterHookTrampoline"
+
+    def __call__(
+        self,
+        tensor: torch.Tensor,
+        hook_body: Callable[..., Any],
+        *freevars: Any,
+    ) -> torch.Tensor:
+        def hook(grad: torch.Tensor) -> torch.Tensor | None:
+            return hook_body(grad, *freevars)
+
+        tensor.register_hook(hook)
+        return tensor
+
+
 class _ApplyBackwardHook(torch.autograd.Function):
     """Custom autograd function that applies a hook during backward.
 
