@@ -715,7 +715,7 @@ User code traceback:
     torch._dynamo.graph_break()
 """
         )
-        self.assertExpectedInline(
+        self.assertEqual(
             _munge_graph_break_message(records[0].getMessage()),
             expected,
         )
@@ -875,7 +875,7 @@ User code traceback:
     torch._dynamo.graph_break()
 """
         )
-        self.assertExpectedInline(
+        self.assertEqual(
             post_munge(_munge_graph_break_message(records[1].getMessage())),
             expected,
         )
@@ -1114,7 +1114,7 @@ User code traceback:
     assert x is None  # noqa: S101
 """
         )
-        self.assertExpectedInline(
+        self.assertEqual(
             _munge_graph_break_message(records[0].getMessage()),
             expected,
         )
@@ -1264,7 +1264,7 @@ User code traceback:
     torch._dynamo.graph_break()
 """
         )
-        self.assertExpectedInline(
+        self.assertEqual(
             _munge_graph_break_message(records[0].getMessage()),
             expected,
         )
@@ -1320,7 +1320,7 @@ User code traceback:
     if x.sum() > 0:
 """
         )
-        self.assertExpectedInline(
+        self.assertEqual(
             _munge_graph_break_message(records[1].getMessage()),
             expected,
         )
@@ -1366,7 +1366,7 @@ User code traceback:
     if x.sum() > 0:
 """
         )
-        self.assertExpectedInline(
+        self.assertEqual(
             _munge_graph_break_message(records[0].getMessage()),
             expected,
         )
@@ -2368,7 +2368,7 @@ User code traceback:
     torch._dynamo.graph_break()
 """
         )
-        self.assertExpectedInline(
+        self.assertEqual(
             _munge_graph_break_message(records[0].getMessage()),
             expected,
         )
@@ -2453,7 +2453,7 @@ User code traceback:
     torch._dynamo.graph_break()
 """
         )
-        self.assertExpectedInline(
+        self.assertEqual(
             _munge_graph_break_message(records[0].getMessage()),
             expected,
         )
@@ -2511,7 +2511,7 @@ User code traceback:
     if x.sum() > 0:
 """
         )
-        self.assertExpectedInline(
+        self.assertEqual(
             _munge_graph_break_message(records[0].getMessage()),
             expected,
         )
