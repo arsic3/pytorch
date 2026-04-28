@@ -14333,6 +14333,204 @@ class TestFlashAttentionVarlenMPS(TestCaseMPS):
     def test_varlen_gqa_bwd_multitile_2x(self):
         self._run_backward_gqa([150, 200], H=8, kvH=4, D=64)
 
+    # ------------------------------------------------------------------
+    # Window-attention helpers
+    # ------------------------------------------------------------------
+
+    def _ref_forward_window(self, q, k, v, seqlens, causal, scale,
+                            wnd_left, wnd_right):
+        """CPU float32 reference for sliding-window attention."""
+        cu = [0] + torch.cumsum(torch.tensor(seqlens), 0).tolist()
+        outs = []
+        for b, L in enumerate(seqlens):
+            q_b = q.narrow(0, cu[b], L).permute(1, 0, 2).unsqueeze(0)  # [1,H,L,D]
+            k_b = k.narrow(0, cu[b], L).permute(1, 0, 2).unsqueeze(0)
+            v_b = v.narrow(0, cu[b], L).permute(1, 0, 2).unsqueeze(0)
+            # Build additive bias mask  [1, 1, L, L]
+            rows = torch.arange(L)
+            cols = torch.arange(L)
+            rel  = cols.unsqueeze(0) - rows.unsqueeze(1)  # [L, L]  col - row
+            mask = torch.zeros(L, L)
+            if causal:
+                mask[rel > 0] = float("-inf")
+            if wnd_left >= 0:
+                mask[rel < -wnd_left] = float("-inf")
+            if wnd_right >= 0:
+                mask[rel > wnd_right] = float("-inf")
+            mask = mask.unsqueeze(0).unsqueeze(0)  # [1,1,L,L]
+            out_b = torch.nn.functional.scaled_dot_product_attention(
+                q_b, k_b, v_b, attn_mask=mask, scale=scale)
+            outs.append(out_b.squeeze(0).permute(1, 0, 2))
+        return torch.cat(outs, dim=0)
+
+    def _run_forward_window(self, seqlens, H, D, wnd_left, wnd_right,
+                            dtype=torch.float16, causal=False):
+        total = sum(seqlens)
+        max_s = max(seqlens)
+        scale = 1.0 / (D ** 0.5)
+        torch.manual_seed(42)
+
+        q = torch.randn(total, H, D, device="mps", dtype=dtype)
+        k = torch.randn(total, H, D, device="mps", dtype=dtype)
+        v = torch.randn(total, H, D, device="mps", dtype=dtype)
+        cu = self._cu_seqlens(seqlens)
+
+        out, _ = self._varlen_op(
+            q, k, v, cu, cu, max_s, max_s, 0.0, causal,
+            window_size_left=wnd_left, window_size_right=wnd_right)
+
+        ref = self._ref_forward_window(
+            q.cpu().float(), k.cpu().float(), v.cpu().float(),
+            seqlens, causal, scale, wnd_left, wnd_right)
+
+        tol = 1e-2 if dtype in (torch.float16, torch.bfloat16) else 5e-4
+        torch.testing.assert_close(out.cpu().float(), ref, atol=tol, rtol=tol,
+                                   msg=f"window fwd mismatch: wnd=({wnd_left},{wnd_right}) "
+                                       f"seqlens={seqlens} causal={causal}")
+
+    def _run_backward_window(self, seqlens, H, D, wnd_left, wnd_right,
+                             dtype=torch.float16, causal=False):
+        total = sum(seqlens)
+        max_s = max(seqlens)
+        scale = 1.0 / (D ** 0.5)
+        torch.manual_seed(42)
+
+        q = torch.randn(total, H, D, device="mps", dtype=dtype, requires_grad=True)
+        k = torch.randn(total, H, D, device="mps", dtype=dtype, requires_grad=True)
+        v = torch.randn(total, H, D, device="mps", dtype=dtype, requires_grad=True)
+
+        qc = q.detach().cpu().float().requires_grad_(True)
+        kc = k.detach().cpu().float().requires_grad_(True)
+        vc = v.detach().cpu().float().requires_grad_(True)
+
+        cu = self._cu_seqlens(seqlens)
+
+        out, _ = self._varlen_op(
+            q, k, v, cu, cu, max_s, max_s, 0.0, causal,
+            window_size_left=wnd_left, window_size_right=wnd_right)
+        out.sum().backward()
+
+        ref = self._ref_forward_window(qc, kc, vc, seqlens, causal, scale,
+                                       wnd_left, wnd_right)
+        ref.sum().backward()
+
+        tol = 2e-2 if dtype in (torch.float16, torch.bfloat16) else 1e-3
+        torch.testing.assert_close(q.grad.cpu().float(), qc.grad, atol=tol, rtol=tol,
+                                   msg=f"window dQ mismatch wnd=({wnd_left},{wnd_right})")
+        torch.testing.assert_close(k.grad.cpu().float(), kc.grad, atol=tol, rtol=tol,
+                                   msg=f"window dK mismatch wnd=({wnd_left},{wnd_right})")
+        torch.testing.assert_close(v.grad.cpu().float(), vc.grad, atol=tol, rtol=tol,
+                                   msg=f"window dV mismatch wnd=({wnd_left},{wnd_right})")
+
+    # ------------------------------------------------------------------
+    # ALiBi helpers
+    # ------------------------------------------------------------------
+
+    def _ref_forward_alibi(self, q, k, v, seqlens, causal, scale, slopes):
+        """CPU float32 reference for ALiBi attention."""
+        H = q.size(1)
+        cu = [0] + torch.cumsum(torch.tensor(seqlens), 0).tolist()
+        outs = []
+        for b, L in enumerate(seqlens):
+            q_b = q.narrow(0, cu[b], L).permute(1, 0, 2).unsqueeze(0)  # [1,H,L,D]
+            k_b = k.narrow(0, cu[b], L).permute(1, 0, 2).unsqueeze(0)
+            v_b = v.narrow(0, cu[b], L).permute(1, 0, 2).unsqueeze(0)
+            rows = torch.arange(L, dtype=torch.float32)
+            cols = torch.arange(L, dtype=torch.float32)
+            rel  = cols.unsqueeze(0) - rows.unsqueeze(1)  # [L, L]  k_pos - q_pos
+            if causal:
+                rel_bias = rel  # causal: slope * (k - q), always <= 0
+            else:
+                rel_bias = -rel.abs()  # bidirectional: slope * -|k - q|
+            # per head: slopes [H] * rel_bias [L, L] -> [H, L, L]
+            alibi_bias = slopes.view(H, 1, 1) * rel_bias.unsqueeze(0)  # [H, L, L]
+            causal_mask = torch.triu(torch.full((L, L), float("-inf")), diagonal=1) if causal else None
+            if causal_mask is not None:
+                alibi_bias = alibi_bias + causal_mask.unsqueeze(0)
+            out_b = torch.nn.functional.scaled_dot_product_attention(
+                q_b, k_b, v_b, attn_mask=alibi_bias.unsqueeze(0), scale=scale)
+            outs.append(out_b.squeeze(0).permute(1, 0, 2))
+        return torch.cat(outs, dim=0)
+
+    def _run_forward_alibi(self, seqlens, H, D, dtype=torch.float16, causal=False):
+        total = sum(seqlens)
+        max_s = max(seqlens)
+        scale = 1.0 / (D ** 0.5)
+        torch.manual_seed(42)
+
+        q = torch.randn(total, H, D, device="mps", dtype=dtype)
+        k = torch.randn(total, H, D, device="mps", dtype=dtype)
+        v = torch.randn(total, H, D, device="mps", dtype=dtype)
+        cu = self._cu_seqlens(seqlens)
+        slopes = torch.rand(H, dtype=torch.float32) * 0.5 + 0.01
+
+        out, _ = self._varlen_op(
+            q, k, v, cu, cu, max_s, max_s, 0.0, causal,
+            alibi_slopes=slopes.to("mps"))
+
+        ref = self._ref_forward_alibi(
+            q.cpu().float(), k.cpu().float(), v.cpu().float(),
+            seqlens, causal, scale, slopes)
+
+        tol = 1e-2 if dtype in (torch.float16, torch.bfloat16) else 5e-4
+        torch.testing.assert_close(out.cpu().float(), ref, atol=tol, rtol=tol,
+                                   msg=f"ALiBi fwd mismatch H={H} causal={causal}")
+
+    # ------------------------------------------------------------------
+    # Window-attention forward
+    # ------------------------------------------------------------------
+
+    def test_varlen_window_fwd_left_only(self):
+        # Only past context: each Q can see 16 tokens back
+        self._run_forward_window([64, 48, 32], H=4, D=64, wnd_left=16, wnd_right=-1)
+
+    def test_varlen_window_fwd_right_only(self):
+        # Bidirectional with bounded future window
+        self._run_forward_window([48, 64], H=4, D=64, wnd_left=-1, wnd_right=8)
+
+    def test_varlen_window_fwd_both(self):
+        # Symmetric sliding window
+        self._run_forward_window([64, 48, 32], H=4, D=64, wnd_left=16, wnd_right=16)
+
+    def test_varlen_window_fwd_causal_left(self):
+        # Causal + left window (sliding-window causal, Mistral style)
+        self._run_forward_window([64, 48], H=4, D=64, wnd_left=16, wnd_right=0,
+                                 causal=True)
+
+    def test_varlen_window_fwd_tight(self):
+        # Very tight window (1 token each side) — forces most tiles to skip
+        self._run_forward_window([48, 64, 32], H=4, D=64, wnd_left=1, wnd_right=1)
+
+    def test_varlen_window_fwd_d128(self):
+        self._run_forward_window([48, 64], H=4, D=128, wnd_left=16, wnd_right=16)
+
+    # ------------------------------------------------------------------
+    # Window-attention backward
+    # ------------------------------------------------------------------
+
+    def test_varlen_window_bwd_left_only(self):
+        self._run_backward_window([32, 48], H=4, D=64, wnd_left=16, wnd_right=-1)
+
+    def test_varlen_window_bwd_both(self):
+        self._run_backward_window([32, 48, 16], H=4, D=64, wnd_left=8, wnd_right=8)
+
+    def test_varlen_window_bwd_causal_left(self):
+        self._run_backward_window([32, 48], H=4, D=64, wnd_left=16, wnd_right=0,
+                                  causal=True)
+
+    # ------------------------------------------------------------------
+    # ALiBi forward
+    # ------------------------------------------------------------------
+
+    def test_varlen_alibi_fwd_noncausal(self):
+        self._run_forward_alibi([64, 48, 32], H=4, D=64)
+
+    def test_varlen_alibi_fwd_causal(self):
+        self._run_forward_alibi([64, 48], H=4, D=64, causal=True)
+
+    def test_varlen_alibi_fwd_d128(self):
+        self._run_forward_alibi([48, 64], H=4, D=128)
+
 instantiate_parametrized_tests(TestFlashAttentionVarlenMPS)
 
 instantiate_parametrized_tests(TestFlashAttentionMPS)

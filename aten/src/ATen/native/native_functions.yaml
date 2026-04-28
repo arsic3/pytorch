@@ -15326,12 +15326,11 @@
   variants: function
   dispatch:
     MPS: _scaled_dot_product_flash_attention_for_mps_backward
-- func: _scaled_dot_product_flash_attention_varlen_for_mps(Tensor query, Tensor key, Tensor value, Tensor cum_seq_q, Tensor cum_seq_k, int max_q, int max_k, float dropout_p, bool is_causal, *, float? scale=None) -> (Tensor output, Tensor logsumexp)
+- func: _scaled_dot_product_flash_attention_varlen_for_mps(Tensor query, Tensor key, Tensor value, Tensor cum_seq_q, Tensor cum_seq_k, SymInt max_q, SymInt max_k, float dropout_p, bool is_causal, *, float? scale=None, SymInt? window_size_left=None, SymInt? window_size_right=None, Tensor? alibi_slopes=None) -> (Tensor output, Tensor logsumexp)
   dispatch:
     MPS: _scaled_dot_product_flash_attention_varlen_for_mps
-  tags: nondeterministic_seeded
 
-- func: _scaled_dot_product_flash_attention_varlen_for_mps_backward(Tensor grad_out, Tensor query, Tensor key, Tensor value, Tensor out, Tensor logsumexp, Tensor cum_seq_q, Tensor cum_seq_k, int max_q, int max_k, float dropout_p, bool is_causal, *, float? scale=None) -> (Tensor grad_query, Tensor grad_key, Tensor grad_value)
+- func: _scaled_dot_product_flash_attention_varlen_for_mps_backward(Tensor grad_out, Tensor query, Tensor key, Tensor value, Tensor out, Tensor logsumexp, Tensor cum_seq_q, Tensor cum_seq_k, SymInt max_q, SymInt max_k, float dropout_p, bool is_causal, *, float? scale=None, SymInt? window_size_left=None, SymInt? window_size_right=None, Tensor? alibi_slopes=None) -> (Tensor grad_query, Tensor grad_key, Tensor grad_value)
   device_check: NoCheck
   variants: function
   dispatch:

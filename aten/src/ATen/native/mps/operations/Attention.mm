@@ -780,7 +780,10 @@ std::tuple<Tensor, Tensor> _scaled_dot_product_flash_attention_varlen_for_mps(
     int64_t max_k,
     double dropout_p,
     bool is_causal,
-    std::optional<double> scale) {
+    std::optional<double> scale,
+    std::optional<int64_t> window_size_left,
+    std::optional<int64_t> window_size_right,
+    const std::optional<Tensor>& alibi_slopes) {
   TORCH_CHECK(dropout_p == 0.0,
     "_scaled_dot_product_flash_attention_varlen_for_mps: dropout not supported");
   TORCH_CHECK(c10::isFloatingType(query.scalar_type()),
@@ -821,6 +824,15 @@ std::tuple<Tensor, Tensor> _scaled_dot_product_flash_attention_varlen_for_mps(
   auto lse   = at::empty({H, total_q},
                           at::TensorOptions().dtype(at::kFloat).device(query.device()));
 
+  // Window attention sentinels: -1 means no bound
+  const int32_t wnd_left  = window_size_left ? (int32_t)*window_size_left  : -1;
+  const int32_t wnd_right = window_size_right ? (int32_t)*window_size_right : -1;
+  const bool has_alibi = alibi_slopes.has_value() && alibi_slopes->defined();
+  // Alibi buffer: [H] float slopes, or a 1-element dummy when unused
+  auto alibi_buf = has_alibi
+      ? alibi_slopes->to(at::kFloat).contiguous()
+      : at::zeros({1}, at::TensorOptions().dtype(at::kFloat).device(query.device()));
+
   using namespace mps;
   const std::string kname =
     fmt::format("flash_attn_varlen_fwd_{}_{}", scalarToMetalTypeString(q_t), D);
@@ -842,7 +854,10 @@ std::tuple<Tensor, Tensor> _scaled_dot_product_flash_attention_varlen_for_mps(
                   cu_q, cu_k,
                   (uint32_t)total_q, (uint32_t)total_k,
                   scale_val, is_causal,
-                  (uint32_t)gqa_factor);
+                  (uint32_t)gqa_factor,
+                  wnd_left, wnd_right,
+                  alibi_buf,
+                  has_alibi);
       [computeEncoder dispatchThreadgroups:grid threadsPerThreadgroup:tg];
     }
   });
@@ -872,7 +887,10 @@ _scaled_dot_product_flash_attention_varlen_for_mps_backward(
     int64_t max_k,
     double dropout_p,
     bool is_causal,
-    std::optional<double> scale) {
+    std::optional<double> scale,
+    std::optional<int64_t> window_size_left,
+    std::optional<int64_t> window_size_right,
+    const std::optional<Tensor>& alibi_slopes) {
   TORCH_CHECK(dropout_p == 0.0,
     "_scaled_dot_product_flash_attention_varlen_for_mps_backward: dropout not supported");
 
@@ -906,6 +924,14 @@ _scaled_dot_product_flash_attention_varlen_for_mps_backward(
   // D_vec[h * total_q + abs_q_row] = rowsum(dO * O)
   auto D_vec = at::empty({H, total_q},
                           at::TensorOptions().dtype(at::kFloat).device(query.device()));
+
+  // Window attention sentinels: -1 means no bound
+  const int32_t wnd_left  = window_size_left ? (int32_t)*window_size_left  : -1;
+  const int32_t wnd_right = window_size_right ? (int32_t)*window_size_right : -1;
+  const bool has_alibi = alibi_slopes.has_value() && alibi_slopes->defined();
+  auto alibi_buf = has_alibi
+      ? alibi_slopes->to(at::kFloat).contiguous()
+      : at::zeros({1}, at::TensorOptions().dtype(at::kFloat).device(query.device()));
 
   using namespace mps;
   const std::string dtype_str   = scalarToMetalTypeString(q_t);
@@ -944,7 +970,10 @@ _scaled_dot_product_flash_attention_varlen_for_mps_backward(
                   cu_q, cu_k,
                   (uint32_t)total_q, (uint32_t)total_k,
                   scale_val, is_causal,
-                  (uint32_t)gqa_factor);
+                  (uint32_t)gqa_factor,
+                  wnd_left, wnd_right,
+                  alibi_buf,
+                  has_alibi);
       [computeEncoder dispatchThreadgroups:MTLSizeMake((NSUInteger)H,
                                                        ((NSUInteger)max_q + BQ - 1) / BQ,
                                                        (NSUInteger)B)
@@ -964,7 +993,10 @@ _scaled_dot_product_flash_attention_varlen_for_mps_backward(
                   cu_q, cu_k,
                   (uint32_t)total_q, (uint32_t)total_k,
                   scale_val, is_causal,
-                  (uint32_t)gqa_factor);
+                  (uint32_t)gqa_factor,
+                  wnd_left, wnd_right,
+                  alibi_buf,
+                  has_alibi);
       [computeEncoder dispatchThreadgroups:MTLSizeMake((NSUInteger)kvH,
                                                        ((NSUInteger)max_k + BK - 1) / BK,
                                                        (NSUInteger)B)

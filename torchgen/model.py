@@ -1106,6 +1106,12 @@ class NativeFunction:
 
         # NB: if your function accidentally has rand/dropout/... in its name
         # but is not actually random, feel free to amend this to special case
+        # _scaled_dot_product_flash_attention_varlen_for_mps accepts dropout_p
+        # only to mirror the CUDA API; it always asserts dropout_p == 0.0 and
+        # is fully deterministic.
+        _mps_deterministic_ops = {
+            "_scaled_dot_product_flash_attention_varlen_for_mps",
+        }
         if (
             "rand" in str(self.func.name)
             or (
@@ -1118,6 +1124,7 @@ class NativeFunction:
                 # Backwards of dropout is typically deterministic
                 and "backward" not in str(self.func.name)
                 and str(self.func.name.name) != "_cudnn_init_dropout_state"
+                and str(self.func.name.name) not in _mps_deterministic_ops
             )
             or self.func.arguments.has_generator_arg()
         ):
