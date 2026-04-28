@@ -2927,5 +2927,73 @@ class TestDTensorCompileE2E(DTensorTestBase):
             )
 
 
+class TestDTensorACCompile(DTensorTestBase):
+    """Test TP (DTensor) + activation checkpointing + torch.compile.
+
+    Regression tests for two bugs that surface when checkpoint_wrapper
+    (activation checkpointing) is applied *inside* a torch.compiled module
+    whose parameters / inputs are DTensors:
+
+    1. Any ``self.attr = ...`` mutation in the forward path of a module
+       inside the checkpoint HOP triggers::
+
+           torch._dynamo.exc.Unsupported: HOP: Unsafe side effect
+
+    2. When dynamo lifts a DTensor freevar from the root graph into the
+       checkpoint subgraph, ``_lift_basic_symbols`` recurses into the
+       wrapper-subclass inner tensor with ``source=None``, eventually
+       hitting::
+
+           AssertionError: Source of '<sym>' is None when lifting it
+           to input of top-level.
+    """
+
+    @property
+    def world_size(self):
+        return 2
+
+    @with_comms
+    @skip_if_lt_x_gpu(2)
+    def test_tp_ac_compile(self):
+        mesh = DeviceMesh(self.device_type, torch.arange(self.world_size))
+
+        model = SimpleModel(self.device_type)
+        model_copy = copy.deepcopy(model)
+
+        plan = {
+            "mlp_0.net1": ColwiseParallel(),
+            "mlp_0.net2": RowwiseParallel(),
+            "mlp_1.net1": ColwiseParallel(),
+            "mlp_1.net2": RowwiseParallel(),
+        }
+
+        # Eager baseline: TP only (no AC, no compile)
+        tp_model_eager = parallelize_module(model, mesh, plan)
+        inp = torch.rand(20, 10, device=self.device_type)
+        expected = tp_model_eager(inp)
+        expected.sum().backward()
+
+        # Test target: TP → AC → compile (the order that triggers the bugs)
+        tp_model = parallelize_module(model_copy, mesh, plan)
+        tp_model = checkpoint_wrapper(
+            tp_model,
+            checkpoint_impl=CheckpointImpl.NO_REENTRANT,
+            checkpoint_fn=checkpoint,
+            use_reentrant=False,
+        )
+        torch._dynamo.config.skip_fwd_side_effects_in_bwd_under_checkpoint = True
+        compiled_model = torch.compile(tp_model, backend="aot_eager", fullgraph=True)
+
+        out = compiled_model(inp)
+        self.assertEqual(out, expected)
+        out.sum().backward()
+
+        for (n1, p1), (n2, p2) in zip(
+            tp_model_eager.named_parameters(),
+            compiled_model.named_parameters(),
+        ):
+            self.assertEqual(p1.grad, p2.grad, msg=f"grad mismatch for {n1}")
+
+
 if __name__ == "__main__":
     run_tests()

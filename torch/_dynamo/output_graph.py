@@ -4359,13 +4359,11 @@ class SubgraphTracer(fx.Tracer):
             elif example_value.layout in {torch.sparse_csc, torch.sparse_bsc}:
                 self._lift_basic_symbols(example_value.ccol_indices(), src)
                 self._lift_basic_symbols(example_value.row_indices(), src)
-            if is_traceable_wrapper_subclass(example_value):
+            if is_traceable_wrapper_subclass(example_value) and src is not None:
                 attrs, ctx = example_value.__tensor_flatten__()
                 for attr in attrs:
                     inner_t = getattr(example_value, attr)
-                    self._lift_basic_symbols(
-                        inner_t, AttrSource(src, attr) if src is not None else None
-                    )
+                    self._lift_basic_symbols(inner_t, AttrSource(src, attr))
         elif isinstance(example_value, torch.SymInt):
             _lift_symbols_in_symint(
                 example_value,
