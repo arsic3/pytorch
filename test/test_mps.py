@@ -14145,16 +14145,16 @@ class TestFlashAttentionVarlenMPS(TestCaseMPS):
         self._run_forward([256, 192], H=4, D=128, dtype=torch.float16, causal=True)
 
     # ------------------------------------------------------------------
-    # Forward — pep-oracle shapes (B=16, max=358, H=8, D=64)
+    # Forward — realistic variable-length workload (B=16, max=358, H=8, D=64)
     # ------------------------------------------------------------------
 
-    def test_varlen_fwd_peporacle_shapes(self):
+    def test_varlen_fwd_realistic_shapes(self):
         import random
         random.seed(7)
         seqlens = [random.randint(50, 358) for _ in range(16)]
         self._run_forward(seqlens, H=8, D=64, dtype=torch.float16)
 
-    def test_varlen_fwd_peporacle_shapes_fp32(self):
+    def test_varlen_fwd_realistic_shapes_fp32(self):
         import random
         random.seed(7)
         seqlens = [random.randint(50, 358) for _ in range(16)]
@@ -14203,10 +14203,10 @@ class TestFlashAttentionVarlenMPS(TestCaseMPS):
         self._run_backward([150, 200], H=4, D=64, dtype=torch.float16, causal=True)
 
     # ------------------------------------------------------------------
-    # Backward — pep-oracle shapes
+    # Backward — realistic variable-length workload
     # ------------------------------------------------------------------
 
-    def test_varlen_bwd_peporacle_shapes(self):
+    def test_varlen_bwd_realistic_shapes(self):
         import random
         random.seed(7)
         seqlens = [random.randint(50, 358) for _ in range(16)]

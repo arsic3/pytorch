@@ -2,7 +2,7 @@
 bench_mps_flash_varlen.py — MPS FlashAttention-2 varlen vs padded benchmark
 
 Compares attention paths on Apple Silicon:
-  nn_mha   : nn.MultiheadAttention + to_dense_batch  (current pep-oracle path)
+  nn_mha   : nn.MultiheadAttention + to_dense_batch  (padded baseline)
   sdpa_pad : F.scaled_dot_product_attention on padded [B,H,max_S,D], no mask
              (lower bound on padded — faster than masked; varlen beating this is strong)
   varlen   : _scaled_dot_product_flash_attention_varlen_for_mps on [total,H,D]
@@ -52,7 +52,7 @@ def to_dense_batch_manual(x_packed, seqlens):
 
 
 def run_nn_mha(x_packed, seqlens, mha_module):
-    """Current pep-oracle path: to_dense_batch + nn.MultiheadAttention."""
+    """nn.MultiheadAttention + to_dense_batch (padded baseline)."""
     x_dense, mask = to_dense_batch_manual(x_packed, seqlens)
     out, _ = mha_module(x_dense, x_dense, x_dense, key_padding_mask=~mask)
     return out[mask]   # unpack back to [total, H*D]
@@ -102,11 +102,11 @@ def make_configs() -> List[Config]:
     random.seed(7)
     configs = []
 
-    # pep-oracle GT workload
-    peporacle_seqlens = [random.randint(50, 358) for _ in range(16)]
+    # realistic workload: B=16, seqlens in [50,358]
+    realistic_seqlens = [random.randint(50, 358) for _ in range(16)]
     configs.append(Config(
-        label="pep-oracle (B=16, mean~204, max=358, H=8, D=64)",
-        B=16, H=8, D=64, seqlens=peporacle_seqlens,
+        label="B=16 S=50-358 H=8 D=64 (variable length)",
+        B=16, H=8, D=64, seqlens=realistic_seqlens,
         dtype=torch.float16, causal=False))
 
     # Uniform padding waste sweep
@@ -164,7 +164,7 @@ def run_all():
         sys.exit(1)
 
     print(f"\nPyTorch {torch.__version__}")
-    print("Columns: nn_mha = current pep-oracle path | sdpa_pad = unmasked padded SDPA "
+    print("Columns: nn_mha = padded baseline | sdpa_pad = unmasked padded SDPA "
           "(lower bound) | varlen = new kernel\n")
 
     col_w = 48
@@ -209,7 +209,7 @@ def run_all():
 
     print()
 
-    # fwd+bwd for pep-oracle config
+    # fwd+bwd for variable-length config
     cfg = configs[0]
     scale = 1.0 / (cfg.D ** 0.5)
     print(f"--- fwd+bwd timing: {cfg.label} ---")
