@@ -78,8 +78,9 @@ class C10_API DebugInfoKind {
     return value_ < other.value_;
   }
 
-  C10_API friend std::ostream& operator<<(std::ostream& os,
-                                          const DebugInfoKind& kind);
+  C10_API friend std::ostream& operator<<(
+      std::ostream& os,
+      const DebugInfoKind& kind);
 
  private:
   // Doesn't compile in a constexpr context; throws in a non-constexpr context.
