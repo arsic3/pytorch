@@ -14023,6 +14023,197 @@ instantiate_parametrized_tests(TestMPS)
 instantiate_parametrized_tests(TestSDPA)
 instantiate_parametrized_tests(TestSmoothL1Loss)
 instantiate_parametrized_tests(TestMetalLibrary)
+
+
+class TestFlashAttentionVarlenMPS(TestCaseMPS):
+    """Tests for _scaled_dot_product_flash_attention_varlen_for_mps.
+
+    Sequences of different lengths are packed end-to-end in [total, H, D]
+    format (no padding).  Reference is per-sequence CPU float32 sdpa.
+    """
+
+    _varlen_op = torch.ops.aten._scaled_dot_product_flash_attention_varlen_for_mps
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _cu_seqlens(seqlens):
+        """Build int32 cu_seqlens [0, L0, L0+L1, ...] on MPS."""
+        return torch.cat([
+            torch.zeros(1, dtype=torch.int32),
+            torch.cumsum(torch.tensor(seqlens, dtype=torch.int32), 0),
+        ]).to("mps")
+
+    def _ref_forward(self, q, k, v, seqlens, causal, scale):
+        """CPU float32 reference: run sdpa per sequence, no padding."""
+        cu = [0] + torch.cumsum(torch.tensor(seqlens), 0).tolist()
+        outs = []
+        for b, L in enumerate(seqlens):
+            Lk = seqlens[b]
+            q_b = q.narrow(0, cu[b], L).permute(1, 0, 2).unsqueeze(0)    # [1,H,L,D]
+            k_b = k.narrow(0, cu[b], Lk).permute(1, 0, 2).unsqueeze(0)
+            v_b = v.narrow(0, cu[b], Lk).permute(1, 0, 2).unsqueeze(0)
+            out_b = torch.nn.functional.scaled_dot_product_attention(
+                q_b, k_b, v_b, is_causal=causal, scale=scale)
+            outs.append(out_b.squeeze(0).permute(1, 0, 2))                # [L,H,D]
+        return torch.cat(outs, dim=0)                                      # [total,H,D]
+
+    def _run_forward(self, seqlens, H, D, dtype=torch.float16, causal=False):
+        total = sum(seqlens)
+        max_s = max(seqlens)
+        scale = 1.0 / (D ** 0.5)
+        torch.manual_seed(42)
+
+        q = torch.randn(total, H, D, device="mps", dtype=dtype)
+        k = torch.randn(total, H, D, device="mps", dtype=dtype)
+        v = torch.randn(total, H, D, device="mps", dtype=dtype)
+        cu = self._cu_seqlens(seqlens)
+
+        out, _ = self._varlen_op(q, k, v, cu, cu, max_s, max_s, 0.0, causal, scale=scale)
+
+        ref = self._ref_forward(
+            q.cpu().float(), k.cpu().float(), v.cpu().float(),
+            seqlens, causal, scale)
+
+        tol = 1e-2 if dtype in (torch.float16, torch.bfloat16) else 5e-4
+        torch.testing.assert_close(out.cpu().float(), ref, atol=tol, rtol=tol,
+                                   msg=f"Forward mismatch: seqlens={seqlens} H={H} D={D} "
+                                       f"dtype={dtype} causal={causal}")
+
+    def _run_backward(self, seqlens, H, D, dtype=torch.float16, causal=False):
+        total = sum(seqlens)
+        max_s = max(seqlens)
+        scale = 1.0 / (D ** 0.5)
+        torch.manual_seed(42)
+
+        q = torch.randn(total, H, D, device="mps", dtype=dtype, requires_grad=True)
+        k = torch.randn(total, H, D, device="mps", dtype=dtype, requires_grad=True)
+        v = torch.randn(total, H, D, device="mps", dtype=dtype, requires_grad=True)
+
+        qc = q.detach().cpu().float().requires_grad_(True)
+        kc = k.detach().cpu().float().requires_grad_(True)
+        vc = v.detach().cpu().float().requires_grad_(True)
+
+        cu = self._cu_seqlens(seqlens)
+
+        out, _ = self._varlen_op(q, k, v, cu, cu, max_s, max_s, 0.0, causal, scale=scale)
+        out.sum().backward()
+
+        ref = self._ref_forward(qc, kc, vc, seqlens, causal, scale)
+        ref.sum().backward()
+
+        tol = 2e-2 if dtype in (torch.float16, torch.bfloat16) else 1e-3
+        torch.testing.assert_close(q.grad.cpu().float(), qc.grad, atol=tol, rtol=tol,
+                                   msg="dQ mismatch")
+        torch.testing.assert_close(k.grad.cpu().float(), kc.grad, atol=tol, rtol=tol,
+                                   msg="dK mismatch")
+        torch.testing.assert_close(v.grad.cpu().float(), vc.grad, atol=tol, rtol=tol,
+                                   msg="dV mismatch")
+
+    # ------------------------------------------------------------------
+    # Forward — dtype x D x causal
+    # ------------------------------------------------------------------
+
+    def test_varlen_fwd_fp16_noncausal_d64(self):
+        self._run_forward([64, 32, 48, 16], H=8, D=64, dtype=torch.float16)
+
+    def test_varlen_fwd_fp16_causal_d64(self):
+        self._run_forward([64, 32, 48, 16], H=8, D=64, dtype=torch.float16, causal=True)
+
+    def test_varlen_fwd_bf16_noncausal_d128(self):
+        self._run_forward([48, 96, 32], H=4, D=128, dtype=torch.bfloat16)
+
+    def test_varlen_fwd_fp32_noncausal_d64(self):
+        self._run_forward([16, 32, 8], H=4, D=64, dtype=torch.float32)
+
+    def test_varlen_fwd_fp32_noncausal_d128(self):
+        self._run_forward([16, 32, 8], H=4, D=128, dtype=torch.float32)
+
+    def test_varlen_fwd_fp16_causal_d128(self):
+        self._run_forward([48, 64, 32], H=4, D=128, dtype=torch.float16, causal=True)
+
+    # ------------------------------------------------------------------
+    # Forward — multi-tile (seqlens > BKV=64 for D=64, forces K-loop)
+    # ------------------------------------------------------------------
+
+    def test_varlen_fwd_multitile_d64(self):
+        self._run_forward([200, 150, 300], H=4, D=64, dtype=torch.float16)
+
+    def test_varlen_fwd_multitile_causal_d128(self):
+        self._run_forward([256, 192], H=4, D=128, dtype=torch.float16, causal=True)
+
+    # ------------------------------------------------------------------
+    # Forward — pep-oracle shapes (B=16, max=358, H=8, D=64)
+    # ------------------------------------------------------------------
+
+    def test_varlen_fwd_peporacle_shapes(self):
+        import random
+        random.seed(7)
+        seqlens = [random.randint(50, 358) for _ in range(16)]
+        self._run_forward(seqlens, H=8, D=64, dtype=torch.float16)
+
+    def test_varlen_fwd_peporacle_shapes_fp32(self):
+        import random
+        random.seed(7)
+        seqlens = [random.randint(50, 358) for _ in range(16)]
+        self._run_forward(seqlens, H=8, D=64, dtype=torch.float32)
+
+    # ------------------------------------------------------------------
+    # Forward — edge cases
+    # ------------------------------------------------------------------
+
+    def test_varlen_fwd_single_token_sequences(self):
+        self._run_forward([1, 1, 1, 5], H=4, D=64, dtype=torch.float16)
+
+    def test_varlen_fwd_B1(self):
+        self._run_forward([128], H=8, D=64, dtype=torch.float16)
+
+    def test_varlen_fwd_B1_long(self):
+        self._run_forward([512], H=4, D=64, dtype=torch.float16)
+
+    def test_varlen_fwd_unequal_lengths(self):
+        # Extreme imbalance: one very long, rest very short
+        self._run_forward([300, 2, 5, 1, 10], H=4, D=64, dtype=torch.float16)
+
+    # ------------------------------------------------------------------
+    # Backward — dtype x D x causal
+    # ------------------------------------------------------------------
+
+    def test_varlen_bwd_fp16_noncausal_d64(self):
+        self._run_backward([32, 48, 16], H=4, D=64, dtype=torch.float16)
+
+    def test_varlen_bwd_fp16_causal_d64(self):
+        self._run_backward([32, 48, 16], H=4, D=64, dtype=torch.float16, causal=True)
+
+    def test_varlen_bwd_bf16_d128(self):
+        self._run_backward([32, 48], H=4, D=128, dtype=torch.bfloat16)
+
+    def test_varlen_bwd_fp32_d64(self):
+        self._run_backward([16, 32, 8], H=4, D=64, dtype=torch.float32)
+
+    def test_varlen_bwd_fp32_causal_d128(self):
+        self._run_backward([16, 32], H=4, D=128, dtype=torch.float32, causal=True)
+
+    def test_varlen_bwd_multitile(self):
+        self._run_backward([150, 200], H=4, D=64, dtype=torch.float16)
+
+    def test_varlen_bwd_multitile_causal(self):
+        self._run_backward([150, 200], H=4, D=64, dtype=torch.float16, causal=True)
+
+    # ------------------------------------------------------------------
+    # Backward — pep-oracle shapes
+    # ------------------------------------------------------------------
+
+    def test_varlen_bwd_peporacle_shapes(self):
+        import random
+        random.seed(7)
+        seqlens = [random.randint(50, 358) for _ in range(16)]
+        self._run_backward(seqlens, H=8, D=64, dtype=torch.float16)
+
+instantiate_parametrized_tests(TestFlashAttentionVarlenMPS)
+
 instantiate_parametrized_tests(TestFlashAttentionMPS)
 
 if __name__ == "__main__":
