@@ -44,6 +44,7 @@ from ..exc import (
     ObservedAttributeError,
     ObservedUserStopIteration,
     raise_observed_exception,
+    raise_type_error,
     unimplemented,
     Unsupported,
     UserError,
@@ -358,6 +359,24 @@ class BaseBuiltinVariable(VariableTracker):
         return isinstance(other, BaseBuiltinVariable) and (
             self.as_python_constant() is other.as_python_constant()  # type: ignore[union-attr]
         )
+
+    def call_method(
+        self,
+        tx: "InstructionTranslator",
+        name: str,
+        args: list[VariableTracker],
+        kwargs: dict[str, VariableTracker],
+    ) -> VariableTracker:
+        # Avoid constant folding so there will be a source
+        if name == "__class_getitem__":
+            key_py = args[0].as_python_constant()
+            try:
+                val = self._fn[key_py]
+            except TypeError as e:
+                raise_type_error(tx, str(e))
+            source = self.source and GetItemSource(self.source, key_py)
+            return VariableTracker.build(tx, val, source)
+        return super().call_method(tx, name, args, kwargs)
 
 
 class BuiltinVariable(BaseBuiltinVariable):
@@ -2308,7 +2327,14 @@ class BuiltinVariable(BaseBuiltinVariable):
             return VariableTracker.build(tx, isinstance(arg_type, isinstance_type))
 
         isinstance_type_tuple: tuple[type, ...]
-        if isinstance(isinstance_type, type) or callable(
+        if isinstance(
+            isinstance_type,
+            typing._UnionGenericAlias,  # pyrefly: ignore [missing-attribute]
+        ):
+            isinstance_type_tuple = isinstance_type_var.var_getattr(
+                tx, "__args__"
+            ).as_python_constant()
+        elif isinstance(isinstance_type, type) or callable(
             # E.g. isinstance(obj, typing.Sequence)
             getattr(isinstance_type, "__instancecheck__", None)
         ):
@@ -2363,10 +2389,14 @@ class BuiltinVariable(BaseBuiltinVariable):
                 ],
             )
 
+        clsinfo = right_ty_py
+        if isinstance(right_ty_py, typing._Final):
+            clsinfo = right_ty.var_getattr(tx, "__args__").as_python_constant()
+
         # WARNING: This might run arbitrary user code `__subclasscheck__`.
         # See the comment in call_isinstance above.
         # pyrefly: ignore [unbound-name]
-        return VariableTracker.build(tx, issubclass(left_ty_py, right_ty_py))
+        return VariableTracker.build(tx, issubclass(left_ty_py, clsinfo))
 
     def call_super(
         self, tx: "InstructionTranslator", a: VariableTracker, b: VariableTracker

@@ -34,6 +34,7 @@ import sys
 import threading
 import traceback
 import types
+import typing
 import warnings
 import weakref
 from collections.abc import Callable, Iterable, Sequence
@@ -741,6 +742,13 @@ class UserDefinedClassVariable(UserDefinedVariable):
                 explanation="Dyanmo does not support tracing mutations on a class when its __dict__ is materialized",
                 hints=graph_break_hints.SUPPORTABLE,
             )
+        elif name == "__class_getitem__":
+            if issubclass(self.value, typing.Generic):
+                # https://github.com/python/cpython/blob/v3.13.13/Objects/typevarobject.c#L1895
+                return variables.UserMethodVariable(
+                    typing._generic_class_getitem,  # pyrefly: ignore [missing-attribute]
+                    self,
+                ).call_function(tx, args, kwargs)
 
         # Dispatch dunder methods defined on the metaclass (e.g., EnumType.__contains__).
         # In Python, `x in Color` calls `type(Color).__contains__(Color, x)`.
@@ -1384,7 +1392,13 @@ class UserDefinedObjectVariable(UserDefinedVariable):
 
         if isinstance(
             self.value,
-            (enum.Enum, torch.DispatchKey, torch._C._functorch.TransformType),
+            (
+                enum.Enum,
+                torch.DispatchKey,
+                torch._C._functorch.TransformType,
+                typing._BaseGenericAlias,  # pyrefly: ignore [missing-attribute]
+                types.GenericAlias,
+            ),
         ) or is_pybind11_enum_member(self.value):
             return self.value
 
@@ -1907,8 +1921,11 @@ class UserDefinedObjectVariable(UserDefinedVariable):
     def is_supported_random(self) -> bool:
         try:
             return self.value in self._supported_random_functions()
-        except TypeError:
+        except (TypeError, AttributeError):
             # TypeError: unhashable type
+            # AttributeError: partially-initialized object whose __hash__
+            # reads attrs that Dynamo has set only symbolically (e.g.
+            # typing._GenericAlias built during tracing).
             return False
 
     def call_function(
