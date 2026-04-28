@@ -1525,11 +1525,11 @@ class DeviceMeshCollectiveTest(DTensorTestBase):
     @unittest.skipIf(not _TORCHCOMM_AVAILABLE, "TorchComms is not installed")
     @dist_config.patch(use_torchcomms=True)
     @_with_torchcomm_env
-    @with_comms(backend="cpu:gloo,cuda:ncclx")
+    @with_comms(backend="cpu:gloo,cuda:nccl")
     def test_pg_api_w_torchcomms(self) -> None:
         ranks = list(range(self.world_size))
         pg = new_group(
-            backend="cpu:gloo,cuda:ncclx",
+            backend="cpu:gloo,cuda:nccl",
             ranks=ranks,
             group_desc="new_pg",
         )
@@ -1559,7 +1559,7 @@ class DeviceMeshCollectiveTest(DTensorTestBase):
         self.assertEqual(gpu_tensor, expected_gpu_tensor)
 
         # Real split with multiple sub-groups; each sub-group must keep both
-        # cpu:gloo and cuda:ncclx backends and dispatch to the right one based
+        # cpu:gloo and cuda:nccl backends and dispatch to the right one based
         # on tensor device.
         pg_ranks_by_dim = torch.arange(self.world_size).view(2, 4)
         split_pg = dist.split_group(pg, pg_ranks_by_dim.tolist())
@@ -1579,11 +1579,11 @@ class DeviceMeshCollectiveTest(DTensorTestBase):
     @unittest.skipIf(not _TORCHCOMM_AVAILABLE, "TorchComms is not installed")
     @dist_config.patch(use_torchcomms=True)
     @_with_torchcomm_env
-    @with_comms(backend="cuda:ncclx")
-    def test_pg_api_w_torchcomms_ncclx(self) -> None:
+    @with_comms(backend="nccl")
+    def test_pg_api_w_torchcomms_nccl(self) -> None:
         ranks = list(range(self.world_size))
         pg = new_group(
-            backend="cuda:ncclx",
+            backend="nccl",
             ranks=ranks,
             group_desc="new_pg",
         )
@@ -1628,7 +1628,7 @@ class DeviceMeshCollectiveTest(DTensorTestBase):
     @unittest.skipIf(not _TORCHCOMM_AVAILABLE, "TorchComms is not installed")
     @dist_config.patch(use_torchcomms=True)
     @_with_torchcomm_env
-    @with_comms(backend="cpu:gloo,cuda:ncclx")
+    @with_comms(backend="cpu:gloo,cuda:nccl")
     def test_device_mesh_w_torchcomms(self) -> None:
         mesh_shape = (2, 2, self.world_size // 4)
         mesh_3d = init_device_mesh(
