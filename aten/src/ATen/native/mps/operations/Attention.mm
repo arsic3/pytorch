@@ -17,6 +17,8 @@
 #include <ATen/ops/empty_native.h>
 #include <ATen/ops/_scaled_dot_product_flash_attention_for_mps_native.h>
 #include <ATen/ops/_scaled_dot_product_flash_attention_for_mps_backward_native.h>
+#include <ATen/ops/_scaled_dot_product_flash_attention_varlen_for_mps_native.h>
+#include <ATen/ops/_scaled_dot_product_flash_attention_varlen_for_mps_backward_native.h>
 #endif
 
 namespace at {
@@ -766,20 +768,6 @@ std::tuple<Tensor, Tensor, Tensor> _scaled_dot_product_flash_attention_for_mps_b
 //        LSE   : [H, total_q]    (flat: h*total_q + abs_q_row)
 // Kernels use [H, total, D] layout; we permute in/out here.
 
-// Forward declarations — replaced by generated headers after native_functions.yaml in chunk 4
-std::tuple<Tensor, Tensor> _scaled_dot_product_flash_attention_varlen_for_mps(
-    const Tensor& query, const Tensor& key, const Tensor& value,
-    const Tensor& cum_seq_q, const Tensor& cum_seq_k,
-    int64_t max_q, int64_t max_k, double dropout_p, bool is_causal,
-    std::optional<double> scale);
-
-std::tuple<Tensor, Tensor, Tensor>
-_scaled_dot_product_flash_attention_varlen_for_mps_backward(
-    const Tensor& grad_out, const Tensor& query, const Tensor& key,
-    const Tensor& value, const Tensor& out, const Tensor& logsumexp,
-    const Tensor& cum_seq_q, const Tensor& cum_seq_k,
-    int64_t max_q, int64_t max_k, double dropout_p, bool is_causal,
-    std::optional<double> scale);
 
 // ---------------------------------------------------------------------------
 
