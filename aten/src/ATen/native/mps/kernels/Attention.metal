@@ -1201,12 +1201,16 @@ template<typename T, int D>
     uint3 tgid [[threadgroup_position_in_grid]],
     uint  tid  [[thread_index_in_threadgroup]])
 {
-    constexpr int EPL = D / 32;
-    constexpr int BQ  = 32;
-    constexpr int BKV = (D == 64) ? 64 : 32;
+    constexpr int EPL  = (D + 31) / 32;
+    constexpr int Dpad = EPL * 32;
+    constexpr int BQ   = 32;
+    constexpr int BKV  = (Dpad <= 32)  ? 128 :
+                         (Dpad <= 64)  ? 64  :
+                         (Dpad <= 128) ? 32  :
+                         (Dpad <= 256) ? 16  : 8;
 
-    threadgroup float K_smem[BKV * D];
-    threadgroup float V_smem[BKV * D];
+    threadgroup float K_smem[BKV * Dpad];
+    threadgroup float V_smem[BKV * Dpad];
 
     const uint h    = tgid.x;        // query head   [0, H)
     const uint b    = tgid.z;        // batch element [0, B)
@@ -1233,8 +1237,10 @@ template<typename T, int D>
     device       T* O_ptr = O + h    * total_q * D + q_start * D;
 
     float q_reg[EPL];
-    for (int e = 0; e < EPL; e++)
-        q_reg[e] = valid_q ? float(Q_ptr[q_row * D + lane * EPL + e]) : 0.0f;
+    for (int e = 0; e < EPL; e++) {
+        int idx = lane * EPL + e;
+        q_reg[e] = (valid_q && idx < D) ? float(Q_ptr[q_row * D + idx]) : 0.0f;
+    }
 
     float acc[EPL] = {};
     float m = -INFINITY, l = 0.0f;
@@ -1249,10 +1255,10 @@ template<typename T, int D>
         // Window-left skip: entire K-tile is too far left for all Q rows in this tile
         if (wnd_left >= 0 && (int)(kb + (uint)BKV - 1) + wnd_left < (int)(tgid.y * BQ)) continue;
 
-        for (uint i = tid; i < (uint)(BKV * D); i += tg_size) {
-            uint r = kb + i / D;
-            uint d = i % D;
-            bool in = (r < kL);
+        for (uint i = tid; i < (uint)(BKV * Dpad); i += tg_size) {
+            uint r = kb + i / Dpad;
+            uint d = i % Dpad;
+            bool in = (r < kL) && (d < (uint)D);
             K_smem[i] = in ? float(K_ptr[r * D + d]) : 0.0f;
             V_smem[i] = in ? float(V_ptr[r * D + d]) : 0.0f;
         }
@@ -1269,7 +1275,7 @@ template<typename T, int D>
 
             float partial = 0.0f;
             for (int e = 0; e < EPL; e++)
-                partial += q_reg[e] * K_smem[j * D + lane * EPL + e];
+                partial += q_reg[e] * K_smem[j * Dpad + lane * EPL + e];
 
             float score = mask_ok ? (simd_sum(partial) * sc) : -INFINITY;
             if (has_alibi && mask_ok) {
@@ -1287,7 +1293,7 @@ template<typename T, int D>
             l = l * alpha + p_j;
 
             for (int e = 0; e < EPL; e++)
-                acc[e] = acc[e] * alpha + p_j * V_smem[j * D + lane * EPL + e];
+                acc[e] = acc[e] * alpha + p_j * V_smem[j * Dpad + lane * EPL + e];
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
@@ -1295,8 +1301,11 @@ template<typename T, int D>
     if (!valid_q) return;
 
     float inv_l = (l > 0.0f) ? (1.0f / l) : 0.0f;
-    for (int e = 0; e < EPL; e++)
-        O_ptr[q_row * D + lane * EPL + e] = T(acc[e] * inv_l);
+    for (int e = 0; e < EPL; e++) {
+        int idx = lane * EPL + e;
+        if (idx < D)
+            O_ptr[q_row * D + idx] = T(acc[e] * inv_l);
+    }
     if (lane == 0)
         LSE[h * total_q + q_start + q_row] = m + metal::precise::log(l);
 }
@@ -1316,8 +1325,9 @@ template<typename T, int D>
     uint3 tgid [[threadgroup_position_in_grid]],
     uint  tid  [[thread_index_in_threadgroup]])
 {
-    constexpr int EPL = D / 32;
-    constexpr int BQ  = 32;
+    constexpr int EPL  = (D + 31) / 32;
+    constexpr int Dpad = EPL * 32;
+    constexpr int BQ   = 32;
 
     const uint h       = tgid.x;
     const uint b       = tgid.z;
@@ -1338,9 +1348,12 @@ template<typename T, int D>
 
     float partial = 0.0f;
     if (valid_q) {
-        for (int e = 0; e < EPL; e++)
-            partial += float(dO_ptr[q_row * D + lane * EPL + e])
-                     * float( O_ptr[q_row * D + lane * EPL + e]);
+        for (int e = 0; e < EPL; e++) {
+            int idx = lane * EPL + e;
+            if (idx < D)
+                partial += float(dO_ptr[q_row * D + idx])
+                         * float( O_ptr[q_row * D + idx]);
+        }
     }
     float total = simd_sum(partial);
     if (lane == 0 && valid_q)
@@ -1373,12 +1386,16 @@ template<typename T, int D>
     uint3 tgid [[threadgroup_position_in_grid]],
     uint  tid  [[thread_index_in_threadgroup]])
 {
-    constexpr int EPL = D / 32;
-    constexpr int BQ  = 32;
-    constexpr int BKV = (D == 64) ? 64 : 32;
+    constexpr int EPL  = (D + 31) / 32;
+    constexpr int Dpad = EPL * 32;
+    constexpr int BQ   = 32;
+    constexpr int BKV  = (Dpad <= 32)  ? 128 :
+                         (Dpad <= 64)  ? 64  :
+                         (Dpad <= 128) ? 32  :
+                         (Dpad <= 256) ? 16  : 8;
 
-    threadgroup float K_smem[BKV * D];
-    threadgroup float V_smem[BKV * D];
+    threadgroup float K_smem[BKV * Dpad];
+    threadgroup float V_smem[BKV * Dpad];
 
     const uint h    = tgid.x;
     const uint b    = tgid.z;
@@ -1412,8 +1429,11 @@ template<typename T, int D>
 
     if (valid_q) {
         for (int e = 0; e < EPL; e++) {
-            q_reg[e]  = float(Q_ptr[q_row * D + lane * EPL + e]);
-            do_reg[e] = float(dO_ptr[q_row * D + lane * EPL + e]);
+            int idx = lane * EPL + e;
+            if (idx < D) {
+                q_reg[e]  = float(Q_ptr[q_row * D + idx]);
+                do_reg[e] = float(dO_ptr[q_row * D + idx]);
+            }
         }
         lse_val = LSE[h * total_q + q_start + q_row];
         d_vec   = Dv[h * total_q + q_start + q_row];
@@ -1426,10 +1446,10 @@ template<typename T, int D>
         if (wnd_right >= 0 && (int)kb > (int)q_max + wnd_right) break;
         if (wnd_left  >= 0 && (int)(kb + (uint)BKV - 1) + wnd_left < (int)(tgid.y * BQ)) continue;
 
-        for (uint i = tid; i < (uint)(BKV * D); i += tg_size) {
-            uint r = kb + i / D;
-            uint d = i % D;
-            bool in = (r < kL);
+        for (uint i = tid; i < (uint)(BKV * Dpad); i += tg_size) {
+            uint r = kb + i / Dpad;
+            uint d = i % Dpad;
+            bool in = (r < kL) && (d < (uint)D);
             K_smem[i] = in ? float(K_ptr[r * D + d]) : 0.0f;
             V_smem[i] = in ? float(V_ptr[r * D + d]) : 0.0f;
         }
@@ -1446,7 +1466,7 @@ template<typename T, int D>
 
             float partial = 0.0f;
             for (int e = 0; e < EPL; e++)
-                partial += q_reg[e] * K_smem[j * D + lane * EPL + e];
+                partial += q_reg[e] * K_smem[j * Dpad + lane * EPL + e];
 
             float score = mask_ok ? (simd_sum(partial) * sc) : -INFINITY;
             if (has_alibi && mask_ok) {
@@ -1458,19 +1478,22 @@ template<typename T, int D>
 
             float dov = 0.0f;
             for (int e = 0; e < EPL; e++)
-                dov += do_reg[e] * V_smem[j * D + lane * EPL + e];
+                dov += do_reg[e] * V_smem[j * Dpad + lane * EPL + e];
             float ds_ij = p_ij * (simd_sum(dov) - d_vec);
 
             for (int e = 0; e < EPL; e++)
-                dq_acc[e] += ds_ij * K_smem[j * D + lane * EPL + e];
+                dq_acc[e] += ds_ij * K_smem[j * Dpad + lane * EPL + e];
         }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
     }
 
     if (!valid_q) return;
-    for (int e = 0; e < EPL; e++)
-        dQ_ptr[q_row * D + lane * EPL + e] = T(dq_acc[e] * sc);
+    for (int e = 0; e < EPL; e++) {
+        int idx = lane * EPL + e;
+        if (idx < D)
+            dQ_ptr[q_row * D + idx] = T(dq_acc[e] * sc);
+    }
 }
 
 // ── varlen backward dK + dV ───────────────────────────────────────────────────
@@ -1506,12 +1529,16 @@ template<typename T, int D>
     uint3 tgid [[threadgroup_position_in_grid]],
     uint  tid  [[thread_index_in_threadgroup]])
 {
-    constexpr int EPL  = D / 32;
+    constexpr int EPL  = (D + 31) / 32;
+    constexpr int Dpad = EPL * 32;
     constexpr int BK   = 32;
-    constexpr int BQS  = (D == 64) ? 64 : 32;
+    constexpr int BQS  = (Dpad <= 32)  ? 128 :
+                         (Dpad <= 64)  ? 64  :
+                         (Dpad <= 128) ? 32  :
+                         (Dpad <= 256) ? 16  : 8;
 
-    threadgroup float  Q_smem[BQS * D];
-    threadgroup float dO_smem[BQS * D];
+    threadgroup float  Q_smem[BQS * Dpad];
+    threadgroup float dO_smem[BQS * Dpad];
 
     const uint kv_h    = tgid.x;   // kv-head index [0, kvH)
     const uint b       = tgid.z;
@@ -1540,8 +1567,11 @@ template<typename T, int D>
     float v_reg[EPL] = {};
     if (valid_k) {
         for (int e = 0; e < EPL; e++) {
-            k_reg[e] = float(K_ptr[k_row * D + lane * EPL + e]);
-            v_reg[e] = float(V_ptr[k_row * D + lane * EPL + e]);
+            int idx = lane * EPL + e;
+            if (idx < D) {
+                k_reg[e] = float(K_ptr[k_row * D + idx]);
+                v_reg[e] = float(V_ptr[k_row * D + idx]);
+            }
         }
     }
 
@@ -1568,10 +1598,10 @@ template<typename T, int D>
             // If all q in tile > k_row + wnd_left, skip
             if (wnd_left >= 0 && (int)qb > (int)k_row + wnd_left) continue;
 
-            for (uint i = tid; i < (uint)(BQS * D); i += tg_size) {
-                uint r = qb + i / D;
-                uint d = i % D;
-                bool in = (r < qL);
+            for (uint i = tid; i < (uint)(BQS * Dpad); i += tg_size) {
+                uint r = qb + i / Dpad;
+                uint d = i % Dpad;
+                bool in = (r < qL) && (d < (uint)D);
                 Q_smem[i]  = in ? float( Q_ptr[r * D + d]) : 0.0f;
                 dO_smem[i] = in ? float(dO_ptr[r * D + d]) : 0.0f;
             }
@@ -1591,7 +1621,7 @@ template<typename T, int D>
 
                 float qk = 0.0f;
                 for (int e = 0; e < EPL; e++)
-                    qk += Q_smem[i * D + lane * EPL + e] * k_reg[e];
+                    qk += Q_smem[i * Dpad + lane * EPL + e] * k_reg[e];
 
                 float raw_score = simd_sum(qk) * sc;
                 if (has_alibi) {
@@ -1603,13 +1633,13 @@ template<typename T, int D>
 
                 float dov = 0.0f;
                 for (int e = 0; e < EPL; e++)
-                    dov += dO_smem[i * D + lane * EPL + e] * v_reg[e];
+                    dov += dO_smem[i * Dpad + lane * EPL + e] * v_reg[e];
                 float ds_ij = p_ij * (simd_sum(dov) - d_vec_i);
 
                 for (int e = 0; e < EPL; e++)
-                    dv_acc[e] += p_ij * dO_smem[i * D + lane * EPL + e];
+                    dv_acc[e] += p_ij * dO_smem[i * Dpad + lane * EPL + e];
                 for (int e = 0; e < EPL; e++)
-                    dk_acc[e] += ds_ij * Q_smem[i * D + lane * EPL + e];
+                    dk_acc[e] += ds_ij * Q_smem[i * Dpad + lane * EPL + e];
             }
 
             threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1618,8 +1648,11 @@ template<typename T, int D>
 
     if (!valid_k) return;
     for (int e = 0; e < EPL; e++) {
-        dK_ptr[k_row * D + lane * EPL + e] = T(dk_acc[e] * sc);
-        dV_ptr[k_row * D + lane * EPL + e] = T(dv_acc[e]);
+        int idx = lane * EPL + e;
+        if (idx < D) {
+            dK_ptr[k_row * D + idx] = T(dk_acc[e] * sc);
+            dV_ptr[k_row * D + idx] = T(dv_acc[e]);
+        }
     }
 }
 
@@ -1708,14 +1741,70 @@ template<typename T, int D>
       uint  tid  [[thread_index_in_threadgroup]]);
 
 #define INSTANTIATE_FLASH_VARLEN_ALL(T) \
+  INSTANTIATE_FLASH_VARLEN_FWD(T, 16)       \
+  INSTANTIATE_FLASH_VARLEN_FWD(T, 32)       \
+  INSTANTIATE_FLASH_VARLEN_FWD(T, 48)       \
   INSTANTIATE_FLASH_VARLEN_FWD(T, 64)       \
-  INSTANTIATE_FLASH_VARLEN_FWD(T, 128)      \
+  INSTANTIATE_FLASH_VARLEN_FWD(T, 80)       \
+  INSTANTIATE_FLASH_VARLEN_FWD(T, 96)       \
+  INSTANTIATE_FLASH_VARLEN_FWD(T, 112)       \
+  INSTANTIATE_FLASH_VARLEN_FWD(T, 128)       \
+  INSTANTIATE_FLASH_VARLEN_FWD(T, 160)       \
+  INSTANTIATE_FLASH_VARLEN_FWD(T, 192)       \
+  INSTANTIATE_FLASH_VARLEN_FWD(T, 224)       \
+  INSTANTIATE_FLASH_VARLEN_FWD(T, 256)       \
+  INSTANTIATE_FLASH_VARLEN_FWD(T, 320)       \
+  INSTANTIATE_FLASH_VARLEN_FWD(T, 384)       \
+  INSTANTIATE_FLASH_VARLEN_FWD(T, 448)       \
+  INSTANTIATE_FLASH_VARLEN_FWD(T, 512)       \
+  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 16)   \
+  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 32)   \
+  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 48)   \
   INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 64)   \
-  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 128)  \
+  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 80)   \
+  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 96)   \
+  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 112)   \
+  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 128)   \
+  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 160)   \
+  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 192)   \
+  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 224)   \
+  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 256)   \
+  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 320)   \
+  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 384)   \
+  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 448)   \
+  INSTANTIATE_FLASH_VARLEN_BWD_PRE(T, 512)   \
+  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 16)    \
+  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 32)    \
+  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 48)    \
   INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 64)    \
-  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 128)   \
+  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 80)    \
+  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 96)    \
+  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 112)    \
+  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 128)    \
+  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 160)    \
+  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 192)    \
+  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 224)    \
+  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 256)    \
+  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 320)    \
+  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 384)    \
+  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 448)    \
+  INSTANTIATE_FLASH_VARLEN_BWD_DQ(T, 512)    \
+  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 16)  \
+  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 32)  \
+  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 48)  \
   INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 64)  \
-  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 128)
+  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 80)  \
+  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 96)  \
+  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 112)  \
+  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 128)  \
+  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 160)  \
+  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 192)  \
+  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 224)  \
+  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 256)  \
+  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 320)  \
+  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 384)  \
+  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 448)  \
+  INSTANTIATE_FLASH_VARLEN_BWD_DKDV(T, 512)
 
 INSTANTIATE_FLASH_VARLEN_ALL(float)
 INSTANTIATE_FLASH_VARLEN_ALL(half)

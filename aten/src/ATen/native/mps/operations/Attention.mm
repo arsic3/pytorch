@@ -800,8 +800,8 @@ std::tuple<Tensor, Tensor> _scaled_dot_product_flash_attention_varlen_for_mps(
 
   const int64_t kvH = key.size(1);
   const int64_t gqa_factor = H / kvH;
-  TORCH_CHECK(D == 64 || D == 128,
-    "_scaled_dot_product_flash_attention_varlen_for_mps: head_dim must be 64 or 128, got ", D);
+  TORCH_CHECK(D >= 1 && D <= 512,
+    "_scaled_dot_product_flash_attention_varlen_for_mps: head_dim must be in [1, 512], got ", D);
   TORCH_CHECK(H % kvH == 0,
     "_scaled_dot_product_flash_attention_varlen_for_mps: H must be divisible by kvH, got H=",
     H, " kvH=", kvH);
