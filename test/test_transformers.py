@@ -2245,7 +2245,7 @@ class TestSDPA(NNTestCase):
                 self.proj_v = nn.Linear(432, self.hidden_size)
 
             def forward(self, x):
-                keep = x.sum(dim=(-1, -2, -3)) != 0 # x: [B, 3, 12, 12]
+                keep = x.sum(dim=(-1, -2, -3)) != 0  # x: [B, 3, 12, 12]
                 x = x[keep]  # [u0, 3, 12, 12].
                 flat = x.flatten(1)  # [u0, 432]
                 q = self.proj_q(flat).view(-1, 1, self.num_heads, self.head_dim).transpose(1, 2)
