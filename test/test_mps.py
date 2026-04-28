@@ -14135,6 +14135,49 @@ class TestFlashAttentionVarlenMPS(TestCaseMPS):
         self._run_forward([48, 64, 32], H=4, D=128, dtype=torch.float16, causal=True)
 
     # ------------------------------------------------------------------
+    # Forward — non-multiples of 32 (arbitrary head_dim support)
+    # ------------------------------------------------------------------
+
+    def test_varlen_fwd_fp16_d48(self):
+        self._run_forward([32, 48, 16], H=4, D=48, dtype=torch.float16)
+
+    def test_varlen_fwd_fp16_causal_d48(self):
+        self._run_forward([32, 48, 16], H=4, D=48, dtype=torch.float16, causal=True)
+
+    def test_varlen_fwd_fp16_d80(self):
+        self._run_forward([32, 48, 16], H=4, D=80, dtype=torch.float16)
+
+    def test_varlen_fwd_fp16_d96(self):
+        self._run_forward([32, 48, 16], H=4, D=96, dtype=torch.float16)
+
+    def test_varlen_fwd_fp16_d112(self):
+        self._run_forward([32, 48, 16], H=4, D=112, dtype=torch.float16)
+
+    def test_varlen_fwd_fp16_d160(self):
+        self._run_forward([32, 48, 16], H=4, D=160, dtype=torch.float16)
+
+    def test_varlen_fwd_fp16_d192(self):
+        self._run_forward([32, 48, 16], H=4, D=192, dtype=torch.float16)
+
+    def test_varlen_fwd_fp16_d224(self):
+        self._run_forward([32, 48, 16], H=4, D=224, dtype=torch.float16)
+
+    def test_varlen_fwd_fp32_d48(self):
+        self._run_forward([32, 48, 16], H=4, D=48, dtype=torch.float32)
+
+    def test_varlen_fwd_fp32_d96(self):
+        self._run_forward([32, 48, 16], H=4, D=96, dtype=torch.float32)
+
+    def test_varlen_fwd_multitile_d48(self):
+        self._run_forward([200, 150], H=4, D=48, dtype=torch.float16)
+
+    def test_varlen_fwd_multitile_d96(self):
+        self._run_forward([200, 150], H=4, D=96, dtype=torch.float16)
+
+    def test_varlen_fwd_multitile_causal_d80(self):
+        self._run_forward([200, 150], H=4, D=80, dtype=torch.float16, causal=True)
+
+    # ------------------------------------------------------------------
     # Forward — multi-tile (seqlens > BKV=64 for D=64, forces K-loop)
     # ------------------------------------------------------------------
 
@@ -14176,6 +14219,37 @@ class TestFlashAttentionVarlenMPS(TestCaseMPS):
     def test_varlen_fwd_unequal_lengths(self):
         # Extreme imbalance: one very long, rest very short
         self._run_forward([300, 2, 5, 1, 10], H=4, D=64, dtype=torch.float16)
+
+    # ------------------------------------------------------------------
+    # Backward — non-multiples of 32 (arbitrary head_dim support)
+    # ------------------------------------------------------------------
+
+    def test_varlen_bwd_fp16_d48(self):
+        self._run_backward([32, 48, 16], H=4, D=48, dtype=torch.float16)
+
+    def test_varlen_bwd_fp16_causal_d48(self):
+        self._run_backward([32, 48, 16], H=4, D=48, dtype=torch.float16, causal=True)
+
+    def test_varlen_bwd_fp16_d80(self):
+        self._run_backward([32, 48, 16], H=4, D=80, dtype=torch.float16)
+
+    def test_varlen_bwd_fp16_d96(self):
+        self._run_backward([32, 48, 16], H=4, D=96, dtype=torch.float16)
+
+    def test_varlen_bwd_fp16_d112(self):
+        self._run_backward([32, 48, 16], H=4, D=112, dtype=torch.float16)
+
+    def test_varlen_bwd_fp32_d48(self):
+        self._run_backward([32, 48, 16], H=4, D=48, dtype=torch.float32)
+
+    def test_varlen_bwd_fp32_d96(self):
+        self._run_backward([32, 48, 16], H=4, D=96, dtype=torch.float32)
+
+    def test_varlen_bwd_multitile_d48(self):
+        self._run_backward([200, 150], H=4, D=48, dtype=torch.float16)
+
+    def test_varlen_bwd_multitile_causal_d80(self):
+        self._run_backward([200, 150], H=4, D=80, dtype=torch.float16, causal=True)
 
     # ------------------------------------------------------------------
     # Backward — dtype x D x causal
