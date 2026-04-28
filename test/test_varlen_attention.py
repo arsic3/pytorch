@@ -19,7 +19,7 @@ from torch.testing._internal.common_cuda import (
     SM120OrLater,
     SM90OrLater,
 )
-from torch.testing._internal.common_device_type import instantiate_device_type_tests
+from torch.testing._internal.common_device_type import instantiate_device_type_tests, onlyMPS
 from torch.testing._internal.common_nn import NNTestCase
 from torch.testing._internal.common_utils import (
     decorateIf,
@@ -1186,9 +1186,98 @@ class TestVarlenAttention(NNTestCase):
             self.assertEqual(out_buf, out)
 
 
+
+    @onlyMPS
+    @parametrize("dtype", [torch.float16])
+    @parametrize("window_size", [(-1, -1), (-1, 0)])
+    def test_mps_varlen_correctness(self, device, dtype, window_size):
+        """Compare varlen_attn against F.scaled_dot_product_attention on MPS."""
+        torch.manual_seed(42)
+        batch_size, seq_len, num_heads, head_dim = 2, 32, 4, 64
+        total = batch_size * seq_len
+        scale = head_dim ** -0.5
+        is_causal = window_size == (-1, 0)
+
+        q = torch.randn(total, num_heads, head_dim, device=device, dtype=dtype)
+        k = torch.randn(total, num_heads, head_dim, device=device, dtype=dtype)
+        v = torch.randn(total, num_heads, head_dim, device=device, dtype=dtype)
+        cu_seq = torch.tensor(
+            [i * seq_len for i in range(batch_size + 1)],
+            device=device,
+            dtype=torch.int32,
+        )
+
+        with torch.no_grad():
+            out_varlen = varlen_attn(
+                q, k, v, cu_seq, cu_seq, seq_len, seq_len,
+                window_size=window_size, scale=scale,
+            )
+            # SDPA reference: reshape to (B, H, S, D), compute, reshape back
+            q_ref = q.view(batch_size, seq_len, num_heads, head_dim).permute(0, 2, 1, 3)
+            k_ref = k.view(batch_size, seq_len, num_heads, head_dim).permute(0, 2, 1, 3)
+            v_ref = v.view(batch_size, seq_len, num_heads, head_dim).permute(0, 2, 1, 3)
+            out_ref = F.scaled_dot_product_attention(
+                q_ref, k_ref, v_ref, is_causal=is_causal, scale=scale,
+            )
+            out_ref = out_ref.permute(0, 2, 1, 3).reshape(total, num_heads, head_dim)
+
+        self.assertEqual(out_varlen.shape, (total, num_heads, head_dim))
+        self.assertEqual(out_varlen.device.type, "mps")
+        self.assertEqual(out_varlen.dtype, dtype)
+        self.assertEqual(out_varlen, out_ref, atol=1e-2, rtol=1e-2)
+
+    @onlyMPS
+    @parametrize("dtype", [torch.float16])
+    def test_mps_varlen_backward(self, device, dtype):
+        """Test varlen_attn backward pass on MPS."""
+        torch.manual_seed(42)
+        batch_size, seq_len, num_heads, head_dim = 2, 32, 4, 64
+        total = batch_size * seq_len
+        embed_dim = num_heads * head_dim
+
+        attention_block = AttentionBlock(embed_dim, num_heads, device, dtype)
+        x = torch.randn(total, embed_dim, device=device, dtype=dtype, requires_grad=True)
+        cu_seq = torch.tensor(
+            [i * seq_len for i in range(batch_size + 1)],
+            device=device,
+            dtype=torch.int32,
+        )
+
+        out = attention_block.forward_varlen(x, cu_seq, seq_len)
+        grad = torch.autograd.grad(out.sum(), x)[0]
+
+        self.assertIsNotNone(grad)
+        self.assertEqual(grad.shape, x.shape)
+        self.assertEqual(grad.dtype, dtype)
+
+    @onlyMPS
+    @parametrize("dtype", [torch.float16])
+    def test_mps_varlen_out(self, device, dtype):
+        """Test varlen_attn_out writes result into pre-allocated buffer on MPS."""
+        torch.manual_seed(42)
+        batch_size, seq_len, num_heads, head_dim = 2, 32, 4, 64
+        total = batch_size * seq_len
+
+        q = torch.randn(total, num_heads, head_dim, device=device, dtype=dtype)
+        k = torch.randn(total, num_heads, head_dim, device=device, dtype=dtype)
+        v = torch.randn(total, num_heads, head_dim, device=device, dtype=dtype)
+        cu_seq = torch.tensor(
+            [i * seq_len for i in range(batch_size + 1)],
+            device=device,
+            dtype=torch.int32,
+        )
+
+        with torch.no_grad():
+            expected = varlen_attn(q, k, v, cu_seq, cu_seq, seq_len, seq_len)
+            out_buf = torch.empty_like(expected)
+            result = varlen_attn_out(out_buf, q, k, v, cu_seq, cu_seq, seq_len, seq_len)
+
+        self.assertEqual(result.data_ptr(), out_buf.data_ptr())
+        self.assertEqual(out_buf, expected)
+
 device_types = ("cuda",)
 
-instantiate_device_type_tests(TestVarlenAttention, globals(), only_for=device_types)
+instantiate_device_type_tests(TestVarlenAttention, globals(), only_for=device_types, allow_mps=True)
 
 if __name__ == "__main__":
     run_tests()

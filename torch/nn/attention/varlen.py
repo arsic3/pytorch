@@ -67,8 +67,28 @@ def _varlen_attn(
     window_size = _normalize_window_size(window_size)
 
     use_cudnn = query.is_cuda and _should_use_cudnn(query.device.index)
+    use_mps = query.is_mps
 
-    if use_cudnn:
+    if use_mps:
+        log.info("Using MPS backend for varlen_attn")
+        if seqused_k is not None or block_table is not None:
+            raise RuntimeError(
+                "seqused_k/block_table is not supported with the MPS backend."
+            )
+        if num_splits is not None:
+            raise RuntimeError("num_splits is not supported with the MPS backend.")
+        cu_seq_k_mps = cu_seq_q if cu_seq_k is None else cu_seq_k
+        output, softmax_lse = torch.ops.aten._scaled_dot_product_flash_attention_varlen_for_mps(
+            query, key, value,
+            cu_seq_q, cu_seq_k_mps,
+            max_q, max_k,
+            0.0,  # dropout_p hardcoded to 0.0
+            is_causal,
+            scale=scale,
+            window_size_left=window_size[0],
+            window_size_right=window_size[1],
+        )
+    elif use_cudnn:
         log.info("Using cuDNN backend for varlen_attn")
 
         if enable_gqa:
@@ -360,8 +380,29 @@ def _varlen_attn_out(
     window_size = _normalize_window_size(window_size)
 
     use_cudnn = query.is_cuda and _should_use_cudnn(query.device.index)
+    use_mps = query.is_mps
 
-    if use_cudnn:
+    if use_mps:
+        if seqused_k is not None or block_table is not None:
+            raise RuntimeError(
+                "seqused_k/block_table is not supported with the MPS backend."
+            )
+        if num_splits is not None:
+            raise RuntimeError("num_splits is not supported with the MPS backend.")
+        cu_seq_k_mps = cu_seq_q if cu_seq_k is None else cu_seq_k
+        output, softmax_lse = torch.ops.aten._scaled_dot_product_flash_attention_varlen_for_mps(
+            query, key, value,
+            cu_seq_q, cu_seq_k_mps,
+            max_q, max_k,
+            0.0,
+            is_causal,
+            scale=scale,
+            window_size_left=window_size[0],
+            window_size_right=window_size[1],
+        )
+        out.copy_(output)
+        return softmax_lse
+    elif use_cudnn:
         # TODO: look into this
         raise RuntimeError("cuDNN backend does not support out variant.")
 
