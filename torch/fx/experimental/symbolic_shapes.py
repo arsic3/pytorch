@@ -1588,6 +1588,36 @@ def _static_eval_sym_bool(x: SymBool) -> bool | None:
         return None
 
 
+def _sym_node_hint_disproves(node: SymNode, target: bool) -> bool:
+    """Check if a SymNode's cached hint disproves that the expression is
+    always ``target``.  Uses the cached hint on the node (cheap) rather
+    than xreplace (expensive).  Falls back to xreplace if the cached hint
+    is not available (e.g. unbacked symbols)."""
+    try:
+        hint = node._hint
+        if hint is None:
+            # No cached hint — try xreplace as fallback
+            if node.shape_env is None:
+                return False
+            subs = node.shape_env.backed_var_to_val
+            if not subs:
+                return False
+            hinted = node.expr.xreplace(subs)
+            if hinted is sympy.S.true:
+                hint = True
+            elif hinted is sympy.S.false:
+                hint = False
+            else:
+                return False
+        if hint is True:
+            return target is False
+        if hint is False:
+            return target is True
+    except Exception:
+        pass
+    return False
+
+
 def statically_known_false(x: BoolLikeType) -> bool:
     """
     Returns True if x can be simplified to a constant and is False.
@@ -1604,6 +1634,9 @@ def statically_known_false(x: BoolLikeType) -> bool:
         if not isinstance(x, bool):
             raise AssertionError(f"Expected bool, got {type(x)}")
         return not x
+
+    if _sym_node_hint_disproves(x.node, target=False):
+        return False
 
     result = _static_eval_sym_bool(x)
     if result is None:
@@ -1627,6 +1660,8 @@ def statically_known_true(x: BoolLikeType) -> bool:
         if not isinstance(x, bool):
             raise AssertionError(f"Expected bool, got {type(x)}")
         return x
+    if _sym_node_hint_disproves(x.node, target=True):
+        return False
     result = _static_eval_sym_bool(x)
     if result is None:
         return False
