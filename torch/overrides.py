@@ -58,6 +58,7 @@ __all__ = [
     "is_tensor_method_or_property",
     "wrap_torch_function",
     "enable_reentrant_dispatch",
+    "redispatch_function",
 ]
 
 _P = ParamSpec("_P")
@@ -2168,3 +2169,40 @@ def enable_reentrant_dispatch():
             yield
         finally:
             pass
+
+
+def redispatch_function(func, types, args, kwargs):
+    """Skip one level of ``__torch_function__`` dispatch and call the function.
+
+    This is primarily useful for **Tensor subclasses** that want to call into
+    a function's implementation while still intercepting PyTorch operations
+    inside that function.
+
+    Example with Tensor subclass::
+
+        class LoggingTensor(torch.Tensor):
+            @classmethod
+            def __torch_function__(cls, func, types, args, kwargs=None):
+                print(f"Calling {func.__name__}")
+                # Skip dispatch for this func, but inner ops still dispatch
+                return torch.overrides.redispatch_function(func, types, args, kwargs)
+
+
+        x = LoggingTensor(torch.tensor([1.0]))
+        y = LoggingTensor(torch.tensor([2.0]))
+        # Prints: "Calling add" once for the outer call
+        # Then prints: "Calling add" again for operations inside add's implementation
+        result = torch.add(x, y)
+
+    For ``TorchFunctionMode``, you typically need ``with self:`` to re-enable
+    the mode inside the function::
+
+        class LoggingMode(TorchFunctionMode):
+            def __torch_function__(self, func, types, args, kwargs=None):
+                print(f"Calling {func.__name__}")
+                with self:  # Re-enable mode for inner calls
+                    return torch.overrides.redispatch_function(
+                        func, types, args, kwargs
+                    )
+    """
+    return torch._C._skip_one_hop_torch_function(func, types, args, kwargs)

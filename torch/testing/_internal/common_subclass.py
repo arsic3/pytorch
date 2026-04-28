@@ -242,6 +242,46 @@ class NonWrapperTensor(torch.Tensor):
         return type(self)(torch.empty(shape))
 
 
+class RedispatchTensor(torch.Tensor):
+    __slots__ = ['call_log']
+
+    def __new__(cls, data):
+        t = torch.Tensor._make_subclass(cls, data, require_grad=data.requires_grad)
+        t.call_log = []
+        return t
+
+    def __repr__(self):
+        with torch._C.DisableTorchFunction():
+            return super().__repr__()
+
+    @classmethod
+    def __torch_function__(cls, func, types, args, kwargs=None):
+        call_log_entry = (func.__qualname__, types, args, kwargs)
+
+        # Collect input call_logs so we can propagate to output tensors
+        input_logs = []
+
+        def append_log(x):
+            if isinstance(x, RedispatchTensor):
+                x.call_log.append(call_log_entry)
+                input_logs.append(x.call_log)
+
+        _ = tree_map(append_log, args)
+        if kwargs:
+            _ = tree_map(append_log, kwargs)
+        ret = torch.overrides.redispatch_function(
+            func, types, args, kwargs)
+
+        def wrap(x):
+            if isinstance(x, torch.Tensor) and not isinstance(x, RedispatchTensor):
+                r = cls(x)
+                if input_logs:
+                    r.call_log = list(input_logs[0])
+                return r
+            return x
+        return tree_map(wrap, ret)
+
+
 # Class used to store info about subclass tensors used in testing.
 class SubclassInfo:
 
@@ -295,6 +335,10 @@ subclass_db = {
         'wrapper_with_custom_strides',
         create_fn=lambda shape: _create_and_access_shape(WrapperTensorWithCustomStrides, shape),
         closed_under_ops=False,
+    ),
+    RedispatchTensor: SubclassInfo(
+        "redispatch_tensor",
+        create_fn=lambda shape: RedispatchTensor(torch.randn(shape))
     ),
 }
 
