@@ -1154,35 +1154,41 @@ INST_FLASH_ALL(float)
 INST_FLASH_ALL(half)
 INST_FLASH_ALL(bfloat)
 
+
 // ═══════════════════════════════════════════════════════════════════════════════
-// Variable-length FlashAttention forward kernel
+// Variable-length FlashAttention-2  (forward + backward)
 // ═══════════════════════════════════════════════════════════════════════════════
 //
-// Input layout : Q/K/V are [H, total_tokens, D]  (no padding, sequences packed)
-// cu_seqlens_q : [B+1] cumulative Q token counts  (e.g. PyG batch.ptr)
-// cu_seqlens_k : [B+1] cumulative K token counts
-// Output layout: O [H, total_q, D],  LSE [H, total_q]
+// Sequences of different lengths are packed end-to-end without padding.
 //
-// Grid  : (H, ceil(max_seqlen_q / BQ), B)
-// TG    : (32, BQ, 1) = 1024 threads  (BQ = 32)
+// Layout  : Q  [H,   total_q, D]   K/V [kvH, total_k, D]
+//           O  [H,   total_q, D]   LSE [H,   total_q]    (float)
+//           Dv [H,   total_q]      (backward scratch, float)
 //
-// Each threadgroup handles one (batch, head, q-tile) triple.  It looks up its
-// sequence length from cu_seqlens, exits early if the tile is out of range, and
-// runs exactly the same online-softmax tile loop as flash_attn_fwd.
+// cu_seqlens : [B+1] cumulative token counts (int32, compatible with PyG batch.ptr)
+// gqa        : H / kvH  (= 1 for standard MHA)
+//
+// Grid      : (H,   ceil(max_seqlen_q / BQ), B)   for forward, preprocess, dQ
+//           : (kvH, ceil(max_seqlen_k / BK), B)   for dK+dV
+// Threadgroup: 1024 flat threads  (32 lanes x 32 rows)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ── varlen forward ────────────────────────────────────────────────────────────
 
 template<typename T, int D>
 [[kernel]] void flash_attn_varlen_fwd(
-    const device T*       Q            [[buffer(0)]],   // [H, total_q, D]
-    const device T*       K            [[buffer(1)]],   // [H, total_k, D]
-    const device T*       V            [[buffer(2)]],   // [H, total_k, D]
-    device       T*       O            [[buffer(3)]],   // [H, total_q, D]
-    device       float*   LSE          [[buffer(4)]],   // [H, total_q]
-    const device uint*    cu_seqlens_q [[buffer(5)]],   // [B+1]
-    const device uint*    cu_seqlens_k [[buffer(6)]],   // [B+1]
+    const device T*       Q            [[buffer(0)]],  // [H,   total_q, D]
+    const device T*       K            [[buffer(1)]],  // [kvH, total_k, D]
+    const device T*       V            [[buffer(2)]],  // [kvH, total_k, D]
+    device       T*       O            [[buffer(3)]],  // [H,   total_q, D]
+    device       float*   LSE          [[buffer(4)]],  // [H,   total_q]
+    const device uint*    cu_seqlens_q [[buffer(5)]],  // [B+1]
+    const device uint*    cu_seqlens_k [[buffer(6)]],  // [B+1]
     const constant uint&  total_q      [[buffer(7)]],
     const constant uint&  total_k      [[buffer(8)]],
     const constant float& sc           [[buffer(9)]],
     const constant bool&  ic           [[buffer(10)]],
+    const constant uint&  gqa          [[buffer(11)]],  // H / kvH
     uint3 tgid [[threadgroup_position_in_grid]],
     uint  tid  [[thread_index_in_threadgroup]])
 {
@@ -1193,12 +1199,12 @@ template<typename T, int D>
     threadgroup float K_smem[BKV * D];
     threadgroup float V_smem[BKV * D];
 
-    const uint h       = tgid.x;   // head index   [0, H)
-    const uint b       = tgid.z;   // batch index  [0, B)
+    const uint h    = tgid.x;        // query head   [0, H)
+    const uint b    = tgid.z;        // batch element [0, B)
+    const uint kv_h = h / gqa;       // kv head      [0, kvH)
     const uint lane    = tid % 32;
-    const uint q_local = tid / 32; // row within the BQ-wide Q tile [0, BQ)
+    const uint q_local = tid / 32;
 
-    // Sequence boundaries for batch element b
     const uint q_start = cu_seqlens_q[b];
     const uint q_end   = cu_seqlens_q[b + 1];
     const uint k_start = cu_seqlens_k[b];
@@ -1206,20 +1212,16 @@ template<typename T, int D>
     const uint qL = q_end - q_start;
     const uint kL = k_end - k_start;
 
-    // Early exit: this tile is entirely past the end of this sequence
     if (tgid.y * BQ >= qL) return;
 
-    const uint q_row     = tgid.y * BQ + q_local;  // local row within sequence
-    const uint q_row_max = tgid.y * BQ + BQ - 1;   // last local row in tile
+    const uint q_row     = tgid.y * BQ + q_local;
+    const uint q_row_max = tgid.y * BQ + BQ - 1;
+    const bool valid_q   = (q_row < qL);
 
-    // Head-offset base pointers into [H, total, D] layout
-    // Token stride within a head = D (contiguous)
-    const device T* Q_ptr = Q + h * total_q * D + q_start * D;
-    const device T* K_ptr = K + h * total_k * D + k_start * D;
-    const device T* V_ptr = V + h * total_k * D + k_start * D;
-    device       T* O_ptr = O + h * total_q * D + q_start * D;
-
-    const bool valid_q = (q_row < qL);
+    const device T* Q_ptr = Q + h    * total_q * D + q_start * D;
+    const device T* K_ptr = K + kv_h * total_k * D + k_start * D;
+    const device T* V_ptr = V + kv_h * total_k * D + k_start * D;
+    device       T* O_ptr = O + h    * total_q * D + q_start * D;
 
     float q_reg[EPL];
     for (int e = 0; e < EPL; e++)
@@ -1228,12 +1230,11 @@ template<typename T, int D>
     float acc[EPL] = {};
     float m = -INFINITY, l = 0.0f;
 
-    const uint tg_size = 32 * BQ; // 1024
+    const uint tg_size = 32 * BQ;
 
     for (uint kb = 0; kb < kL; kb += BKV) {
         if (ic && kb > q_row_max) break;
 
-        // Cooperatively load BKV rows of K and V into threadgroup memory
         for (uint i = tid; i < (uint)(BKV * D); i += tg_size) {
             uint r = kb + i / D;
             uint d = i % D;
@@ -1275,43 +1276,10 @@ template<typename T, int D>
         LSE[h * total_q + q_start + q_row] = m + metal::precise::log(l);
 }
 
-// ── varlen explicit instantiation ────────────────────────────────────────────
-
-#define INST_FLASH_VARLEN_FWD(T, D) \
-  template [[host_name("flash_attn_varlen_fwd_" #T "_" #D)]] [[kernel]] \
-  void flash_attn_varlen_fwd<T, D>( \
-      const device T*       Q            [[buffer(0)]],  \
-      const device T*       K            [[buffer(1)]],  \
-      const device T*       V            [[buffer(2)]],  \
-      device       T*       O            [[buffer(3)]],  \
-      device       float*   LSE          [[buffer(4)]],  \
-      const device uint*    cu_seqlens_q [[buffer(5)]],  \
-      const device uint*    cu_seqlens_k [[buffer(6)]],  \
-      const constant uint&  total_q      [[buffer(7)]],  \
-      const constant uint&  total_k      [[buffer(8)]],  \
-      const constant float& sc           [[buffer(9)]],  \
-      const constant bool&  ic           [[buffer(10)]], \
-      uint3 tgid [[threadgroup_position_in_grid]],       \
-      uint  tid  [[thread_index_in_threadgroup]]);
-
-#define INST_FLASH_VARLEN_ALL(T) \
-  INST_FLASH_VARLEN_FWD(T, 64)  \
-  INST_FLASH_VARLEN_FWD(T, 128)
-
-INST_FLASH_VARLEN_ALL(float)
-INST_FLASH_VARLEN_ALL(half)
-INST_FLASH_VARLEN_ALL(bfloat)
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// varlen Backward (preprocess, dQ, dK+dV)
-// Layout : [H, total, D]  (same as varlen forward)
-// Grid   : (H, ceil(max_seqlen/tile), B)  — batch on tgid.z
-// GQA    : not supported (pep-oracle is standard MHA)
-// ═══════════════════════════════════════════════════════════════════════════════
-
 // ── varlen backward preprocess ────────────────────────────────────────────────
-// Dv[h*total_q + q_start + q_row] = rowsum(dO_i * O_i)
-// Grid : (H, ceil(max_qL/BQ), B),  TG : 1024 flat threads (32 lanes x BQ rows)
+// Dv[h * total_q + q_start + q_row] = rowsum(dO * O)
+// No GQA dependency: operates on Q-side tensors only.
+// Grid : (H, ceil(max_qL/BQ), B),  TG : 1024 flat threads
 
 template<typename T, int D>
 [[kernel]] void flash_attn_varlen_bwd_preprocess(
@@ -1343,7 +1311,6 @@ template<typename T, int D>
     const device T* dO_ptr = dO + h * total_q * D + q_start * D;
     const device T* O_ptr  = O  + h * total_q * D + q_start * D;
 
-    // Guard OOB reads; all lanes in a simd group share q_row so branch is uniform
     float partial = 0.0f;
     if (valid_q) {
         for (int e = 0; e < EPL; e++)
@@ -1360,19 +1327,20 @@ template<typename T, int D>
 
 template<typename T, int D>
 [[kernel]] void flash_attn_varlen_bwd_dq(
-    const device T*       Q            [[buffer(0)]],  // [H, total_q, D]
-    const device T*       K            [[buffer(1)]],  // [H, total_k, D]
-    const device T*       V            [[buffer(2)]],  // [H, total_k, D]
-    const device T*       dO           [[buffer(3)]],  // [H, total_q, D]
-    const device float*   LSE          [[buffer(4)]],  // [H, total_q]
-    const device float*   Dv           [[buffer(5)]],  // [H, total_q]
-    device       T*       dQ           [[buffer(6)]],  // [H, total_q, D]
+    const device T*       Q            [[buffer(0)]],  // [H,   total_q, D]
+    const device T*       K            [[buffer(1)]],  // [kvH, total_k, D]
+    const device T*       V            [[buffer(2)]],  // [kvH, total_k, D]
+    const device T*       dO           [[buffer(3)]],  // [H,   total_q, D]
+    const device float*   LSE          [[buffer(4)]],  // [H,   total_q]
+    const device float*   Dv           [[buffer(5)]],  // [H,   total_q]
+    device       T*       dQ           [[buffer(6)]],  // [H,   total_q, D]
     const device uint*    cu_seqlens_q [[buffer(7)]],  // [B+1]
     const device uint*    cu_seqlens_k [[buffer(8)]],  // [B+1]
     const constant uint&  total_q      [[buffer(9)]],
     const constant uint&  total_k      [[buffer(10)]],
     const constant float& sc           [[buffer(11)]],
     const constant bool&  ic           [[buffer(12)]],
+    const constant uint&  gqa          [[buffer(13)]],  // H / kvH
     uint3 tgid [[threadgroup_position_in_grid]],
     uint  tid  [[thread_index_in_threadgroup]])
 {
@@ -1383,8 +1351,9 @@ template<typename T, int D>
     threadgroup float K_smem[BKV * D];
     threadgroup float V_smem[BKV * D];
 
-    const uint h       = tgid.x;
-    const uint b       = tgid.z;
+    const uint h    = tgid.x;
+    const uint b    = tgid.z;
+    const uint kv_h = h / gqa;
     const uint lane    = tid % 32;
     const uint q_local = tid / 32;
 
@@ -1401,11 +1370,11 @@ template<typename T, int D>
     const uint q_max = tgid.y * BQ + BQ - 1;
     const bool valid_q = (q_row < qL);
 
-    const device T* Q_ptr  = Q  + h * total_q * D + q_start * D;
-    const device T* K_ptr  = K  + h * total_k * D + k_start * D;
-    const device T* V_ptr  = V  + h * total_k * D + k_start * D;
-    const device T* dO_ptr = dO + h * total_q * D + q_start * D;
-    device       T* dQ_ptr = dQ + h * total_q * D + q_start * D;
+    const device T* Q_ptr  = Q  + h    * total_q * D + q_start * D;
+    const device T* K_ptr  = K  + kv_h * total_k * D + k_start * D;
+    const device T* V_ptr  = V  + kv_h * total_k * D + k_start * D;
+    const device T* dO_ptr = dO + h    * total_q * D + q_start * D;
+    device       T* dQ_ptr = dQ + h    * total_q * D + q_start * D;
 
     float q_reg[EPL]  = {};
     float do_reg[EPL] = {};
@@ -1467,24 +1436,28 @@ template<typename T, int D>
 
 // ── varlen backward dK + dV ───────────────────────────────────────────────────
 // K/V stay in per-simdgroup registers; Q+dO are tiled through smem.
-// Grid : (H, ceil(max_kL/BK), B),  TG : 1024 flat threads
+// Grid : (kvH, ceil(max_kL/BK), B),  TG : 1024 flat threads
+//
+// GQA: tgid.x is the kv-head index. For each kv-head we loop over all
+// gqa_factor query heads that share it, accumulating dK and dV.
 
 template<typename T, int D>
 [[kernel]] void flash_attn_varlen_bwd_dkdv(
-    const device T*       Q            [[buffer(0)]],  // [H, total_q, D]
-    const device T*       K            [[buffer(1)]],  // [H, total_k, D]
-    const device T*       V            [[buffer(2)]],  // [H, total_k, D]
-    const device T*       dO           [[buffer(3)]],  // [H, total_q, D]
-    const device float*   LSE          [[buffer(4)]],  // [H, total_q]
-    const device float*   Dv           [[buffer(5)]],  // [H, total_q]
-    device       T*       dK           [[buffer(6)]],  // [H, total_k, D]
-    device       T*       dV           [[buffer(7)]],  // [H, total_k, D]
+    const device T*       Q            [[buffer(0)]],  // [H,   total_q, D]
+    const device T*       K            [[buffer(1)]],  // [kvH, total_k, D]
+    const device T*       V            [[buffer(2)]],  // [kvH, total_k, D]
+    const device T*       dO           [[buffer(3)]],  // [H,   total_q, D]
+    const device float*   LSE          [[buffer(4)]],  // [H,   total_q]
+    const device float*   Dv           [[buffer(5)]],  // [H,   total_q]
+    device       T*       dK           [[buffer(6)]],  // [kvH, total_k, D]
+    device       T*       dV           [[buffer(7)]],  // [kvH, total_k, D]
     const device uint*    cu_seqlens_q [[buffer(8)]],  // [B+1]
     const device uint*    cu_seqlens_k [[buffer(9)]],  // [B+1]
     const constant uint&  total_q      [[buffer(10)]],
     const constant uint&  total_k      [[buffer(11)]],
     const constant float& sc           [[buffer(12)]],
     const constant bool&  ic           [[buffer(13)]],
+    const constant uint&  gqa          [[buffer(14)]],  // H / kvH
     uint3 tgid [[threadgroup_position_in_grid]],
     uint  tid  [[thread_index_in_threadgroup]])
 {
@@ -1495,7 +1468,7 @@ template<typename T, int D>
     threadgroup float  Q_smem[BQS * D];
     threadgroup float dO_smem[BQS * D];
 
-    const uint h       = tgid.x;
+    const uint kv_h    = tgid.x;   // kv-head index [0, kvH)
     const uint b       = tgid.z;
     const uint lane    = tid % 32;
     const uint k_local = tid / 32;
@@ -1513,12 +1486,10 @@ template<typename T, int D>
     const uint k_min = tgid.y * BK;
     const bool valid_k = (k_row < kL);
 
-    const device T* Q_ptr  = Q  + h * total_q * D + q_start * D;
-    const device T* dO_ptr = dO + h * total_q * D + q_start * D;
-    const device T* K_ptr  = K  + h * total_k * D + k_start * D;
-    const device T* V_ptr  = V  + h * total_k * D + k_start * D;
-    device       T* dK_ptr = dK + h * total_k * D + k_start * D;
-    device       T* dV_ptr = dV + h * total_k * D + k_start * D;
+    const device T* K_ptr  = K  + kv_h * total_k * D + k_start * D;
+    const device T* V_ptr  = V  + kv_h * total_k * D + k_start * D;
+    device       T* dK_ptr = dK + kv_h * total_k * D + k_start * D;
+    device       T* dV_ptr = dV + kv_h * total_k * D + k_start * D;
 
     float k_reg[EPL] = {};
     float v_reg[EPL] = {};
@@ -1534,46 +1505,54 @@ template<typename T, int D>
 
     const uint tg_size = 32 * BK;
 
-    for (uint qb = 0; qb < qL; qb += BQS) {
-        if (ic && qb + (uint)BQS - 1 < k_min) continue;
+    // Accumulate contributions from all gqa query heads that share this kv head
+    for (uint g = 0; g < gqa; g++) {
+        const uint q_head = kv_h * gqa + g;
 
-        for (uint i = tid; i < (uint)(BQS * D); i += tg_size) {
-            uint r = qb + i / D;
-            uint d = i % D;
-            bool in = (r < qL);
-            Q_smem[i]  = in ? float( Q_ptr[r * D + d]) : 0.0f;
-            dO_smem[i] = in ? float(dO_ptr[r * D + d]) : 0.0f;
+        const device T* Q_ptr  = Q  + q_head * total_q * D + q_start * D;
+        const device T* dO_ptr = dO + q_head * total_q * D + q_start * D;
+
+        for (uint qb = 0; qb < qL; qb += BQS) {
+            if (ic && qb + (uint)BQS - 1 < k_min) continue;
+
+            for (uint i = tid; i < (uint)(BQS * D); i += tg_size) {
+                uint r = qb + i / D;
+                uint d = i % D;
+                bool in = (r < qL);
+                Q_smem[i]  = in ? float( Q_ptr[r * D + d]) : 0.0f;
+                dO_smem[i] = in ? float(dO_ptr[r * D + d]) : 0.0f;
+            }
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+
+            const uint tile_end = min(qb + (uint)BQS, qL);
+
+            for (uint q_row = qb; q_row < tile_end; ++q_row) {
+                if (ic && k_row > q_row) continue;
+
+                float lse_i   = LSE[q_head * total_q + q_start + q_row];
+                float d_vec_i = Dv[q_head * total_q + q_start + q_row];
+                int i = (int)(q_row - qb);
+
+                float qk = 0.0f;
+                for (int e = 0; e < EPL; e++)
+                    qk += Q_smem[i * D + lane * EPL + e] * k_reg[e];
+                float p_ij = metal::precise::exp(simd_sum(qk) * sc - lse_i);
+                if (!valid_k) p_ij = 0.0f;
+
+                float dov = 0.0f;
+                for (int e = 0; e < EPL; e++)
+                    dov += dO_smem[i * D + lane * EPL + e] * v_reg[e];
+                float ds_ij = p_ij * (simd_sum(dov) - d_vec_i);
+
+                for (int e = 0; e < EPL; e++)
+                    dv_acc[e] += p_ij * dO_smem[i * D + lane * EPL + e];
+                for (int e = 0; e < EPL; e++)
+                    dk_acc[e] += ds_ij * Q_smem[i * D + lane * EPL + e];
+            }
+
+            threadgroup_barrier(mem_flags::mem_threadgroup);
         }
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-
-        const uint tile_end = min(qb + (uint)BQS, qL);
-
-        for (uint q_row = qb; q_row < tile_end; ++q_row) {
-            if (ic && k_row > q_row) continue;
-
-            float lse_i   = LSE[h * total_q + q_start + q_row];
-            float d_vec_i = Dv[h * total_q + q_start + q_row];
-            int i = (int)(q_row - qb);
-
-            float qk = 0.0f;
-            for (int e = 0; e < EPL; e++)
-                qk += Q_smem[i * D + lane * EPL + e] * k_reg[e];
-            float p_ij = metal::precise::exp(simd_sum(qk) * sc - lse_i);
-            if (!valid_k) p_ij = 0.0f;
-
-            float dov = 0.0f;
-            for (int e = 0; e < EPL; e++)
-                dov += dO_smem[i * D + lane * EPL + e] * v_reg[e];
-            float ds_ij = p_ij * (simd_sum(dov) - d_vec_i);
-
-            for (int e = 0; e < EPL; e++)
-                dv_acc[e] += p_ij * dO_smem[i * D + lane * EPL + e];
-            for (int e = 0; e < EPL; e++)
-                dk_acc[e] += ds_ij * Q_smem[i * D + lane * EPL + e];
-        }
-
-        threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
+    } // end gqa loop
 
     if (!valid_k) return;
     for (int e = 0; e < EPL; e++) {
@@ -1582,7 +1561,25 @@ template<typename T, int D>
     }
 }
 
-// ── varlen backward explicit instantiation ────────────────────────────────────
+// ── varlen explicit instantiation ─────────────────────────────────────────────
+
+#define INST_FLASH_VARLEN_FWD(T, D) \
+  template [[host_name("flash_attn_varlen_fwd_" #T "_" #D)]] [[kernel]] \
+  void flash_attn_varlen_fwd<T, D>( \
+      const device T*       Q            [[buffer(0)]],  \
+      const device T*       K            [[buffer(1)]],  \
+      const device T*       V            [[buffer(2)]],  \
+      device       T*       O            [[buffer(3)]],  \
+      device       float*   LSE          [[buffer(4)]],  \
+      const device uint*    cu_seqlens_q [[buffer(5)]],  \
+      const device uint*    cu_seqlens_k [[buffer(6)]],  \
+      const constant uint&  total_q      [[buffer(7)]],  \
+      const constant uint&  total_k      [[buffer(8)]],  \
+      const constant float& sc           [[buffer(9)]],  \
+      const constant bool&  ic           [[buffer(10)]], \
+      const constant uint&  gqa          [[buffer(11)]], \
+      uint3 tgid [[threadgroup_position_in_grid]],       \
+      uint  tid  [[thread_index_in_threadgroup]]);
 
 #define INST_FLASH_VARLEN_BWD_PRE(T, D) \
   template [[host_name("flash_attn_varlen_bwd_pre_" #T "_" #D)]] [[kernel]] \
@@ -1608,10 +1605,11 @@ template<typename T, int D>
       const device uint*    cu_seqlens_q [[buffer(7)]],  \
       const device uint*    cu_seqlens_k [[buffer(8)]],  \
       const constant uint&  total_q      [[buffer(9)]],  \
-      const constant uint&  total_k      [[buffer(10)]],  \
-      const constant float& sc           [[buffer(11)]],  \
-      const constant bool&  ic           [[buffer(12)]],  \
-      uint3 tgid [[threadgroup_position_in_grid]],        \
+      const constant uint&  total_k      [[buffer(10)]], \
+      const constant float& sc           [[buffer(11)]], \
+      const constant bool&  ic           [[buffer(12)]], \
+      const constant uint&  gqa          [[buffer(13)]], \
+      uint3 tgid [[threadgroup_position_in_grid]],       \
       uint  tid  [[thread_index_in_threadgroup]]);
 
 #define INST_FLASH_VARLEN_BWD_DKDV(T, D) \
@@ -1627,21 +1625,24 @@ template<typename T, int D>
       device       T*       dV           [[buffer(7)]],  \
       const device uint*    cu_seqlens_q [[buffer(8)]],  \
       const device uint*    cu_seqlens_k [[buffer(9)]],  \
-      const constant uint&  total_q      [[buffer(10)]],  \
-      const constant uint&  total_k      [[buffer(11)]],  \
-      const constant float& sc           [[buffer(12)]],  \
-      const constant bool&  ic           [[buffer(13)]],  \
-      uint3 tgid [[threadgroup_position_in_grid]],         \
+      const constant uint&  total_q      [[buffer(10)]], \
+      const constant uint&  total_k      [[buffer(11)]], \
+      const constant float& sc           [[buffer(12)]], \
+      const constant bool&  ic           [[buffer(13)]], \
+      const constant uint&  gqa          [[buffer(14)]], \
+      uint3 tgid [[threadgroup_position_in_grid]],       \
       uint  tid  [[thread_index_in_threadgroup]]);
 
-#define INST_FLASH_VARLEN_BWD_ALL(T) \
-  INST_FLASH_VARLEN_BWD_PRE(T, 64)    \
-  INST_FLASH_VARLEN_BWD_PRE(T, 128)   \
-  INST_FLASH_VARLEN_BWD_DQ(T, 64)     \
-  INST_FLASH_VARLEN_BWD_DQ(T, 128)    \
-  INST_FLASH_VARLEN_BWD_DKDV(T, 64)   \
+#define INST_FLASH_VARLEN_ALL(T) \
+  INST_FLASH_VARLEN_FWD(T, 64)       \
+  INST_FLASH_VARLEN_FWD(T, 128)      \
+  INST_FLASH_VARLEN_BWD_PRE(T, 64)   \
+  INST_FLASH_VARLEN_BWD_PRE(T, 128)  \
+  INST_FLASH_VARLEN_BWD_DQ(T, 64)    \
+  INST_FLASH_VARLEN_BWD_DQ(T, 128)   \
+  INST_FLASH_VARLEN_BWD_DKDV(T, 64)  \
   INST_FLASH_VARLEN_BWD_DKDV(T, 128)
 
-INST_FLASH_VARLEN_BWD_ALL(float)
-INST_FLASH_VARLEN_BWD_ALL(half)
-INST_FLASH_VARLEN_BWD_ALL(bfloat)
+INST_FLASH_VARLEN_ALL(float)
+INST_FLASH_VARLEN_ALL(half)
+INST_FLASH_VARLEN_ALL(bfloat)

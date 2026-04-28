@@ -14212,6 +14212,127 @@ class TestFlashAttentionVarlenMPS(TestCaseMPS):
         seqlens = [random.randint(50, 358) for _ in range(16)]
         self._run_backward(seqlens, H=8, D=64, dtype=torch.float16)
 
+    # ------------------------------------------------------------------
+    # GQA helpers
+    # ------------------------------------------------------------------
+
+    def _ref_forward_gqa(self, q, k, v, seqlens, H, kvH, causal, scale):
+        """CPU float32 reference for GQA: K/V have kvH heads, Q has H heads."""
+        gqa = H // kvH
+        cu = [0] + torch.cumsum(torch.tensor(seqlens), 0).tolist()
+        outs = []
+        for b, L in enumerate(seqlens):
+            q_b = q.narrow(0, cu[b], L).permute(1, 0, 2).unsqueeze(0)  # [1,H,L,D]
+            k_b = k.narrow(0, cu[b], L).permute(1, 0, 2).unsqueeze(0)  # [1,kvH,L,D]
+            v_b = v.narrow(0, cu[b], L).permute(1, 0, 2).unsqueeze(0)
+            k_b = k_b.repeat_interleave(gqa, dim=1)                      # [1,H,L,D]
+            v_b = v_b.repeat_interleave(gqa, dim=1)
+            out_b = torch.nn.functional.scaled_dot_product_attention(
+                q_b, k_b, v_b, is_causal=causal, scale=scale)
+            outs.append(out_b.squeeze(0).permute(1, 0, 2))               # [L,H,D]
+        return torch.cat(outs, dim=0)                                     # [total,H,D]
+
+    def _run_forward_gqa(self, seqlens, H, kvH, D, dtype=torch.float16, causal=False):
+        total = sum(seqlens)
+        max_s = max(seqlens)
+        scale = 1.0 / (D ** 0.5)
+        torch.manual_seed(42)
+
+        q = torch.randn(total, H,   D, device="mps", dtype=dtype)
+        k = torch.randn(total, kvH, D, device="mps", dtype=dtype)
+        v = torch.randn(total, kvH, D, device="mps", dtype=dtype)
+        cu = self._cu_seqlens(seqlens)
+
+        out, _ = self._varlen_op(q, k, v, cu, cu, max_s, max_s, 0.0, causal, scale=scale)
+
+        ref = self._ref_forward_gqa(
+            q.cpu().float(), k.cpu().float(), v.cpu().float(),
+            seqlens, H, kvH, causal, scale)
+
+        tol = 1e-2 if dtype in (torch.float16, torch.bfloat16) else 5e-4
+        torch.testing.assert_close(out.cpu().float(), ref, atol=tol, rtol=tol,
+                                   msg=f"GQA fwd mismatch: H={H} kvH={kvH} D={D} "
+                                       f"seqlens={seqlens} causal={causal}")
+
+    def _run_backward_gqa(self, seqlens, H, kvH, D, dtype=torch.float16, causal=False):
+        total = sum(seqlens)
+        max_s = max(seqlens)
+        scale = 1.0 / (D ** 0.5)
+        gqa = H // kvH
+        torch.manual_seed(42)
+
+        q = torch.randn(total, H,   D, device="mps", dtype=dtype, requires_grad=True)
+        k = torch.randn(total, kvH, D, device="mps", dtype=dtype, requires_grad=True)
+        v = torch.randn(total, kvH, D, device="mps", dtype=dtype, requires_grad=True)
+
+        qc = q.detach().cpu().float().requires_grad_(True)
+        kc = k.detach().cpu().float().requires_grad_(True)
+        vc = v.detach().cpu().float().requires_grad_(True)
+
+        cu = self._cu_seqlens(seqlens)
+
+        out, _ = self._varlen_op(q, k, v, cu, cu, max_s, max_s, 0.0, causal, scale=scale)
+        out.sum().backward()
+
+        ref = self._ref_forward_gqa(qc, kc, vc, seqlens, H, kvH, causal, scale)
+        ref.sum().backward()
+
+        # dK / dV are [total, kvH, D] — reference kc.grad/vc.grad already in that shape
+        tol = 2e-2 if dtype in (torch.float16, torch.bfloat16) else 1e-3
+        torch.testing.assert_close(q.grad.cpu().float(), qc.grad, atol=tol, rtol=tol,
+                                   msg=f"GQA dQ mismatch H={H} kvH={kvH}")
+        torch.testing.assert_close(k.grad.cpu().float(), kc.grad, atol=tol, rtol=tol,
+                                   msg=f"GQA dK mismatch H={H} kvH={kvH}")
+        torch.testing.assert_close(v.grad.cpu().float(), vc.grad, atol=tol, rtol=tol,
+                                   msg=f"GQA dV mismatch H={H} kvH={kvH}")
+
+    # ------------------------------------------------------------------
+    # GQA forward
+    # ------------------------------------------------------------------
+
+    def test_varlen_gqa_fwd_2x_d64(self):
+        # H=8, kvH=4 (gqa=2), standard GQA
+        self._run_forward_gqa([64, 32, 48, 16], H=8, kvH=4, D=64)
+
+    def test_varlen_gqa_fwd_4x_d64(self):
+        self._run_forward_gqa([48, 96, 32], H=8, kvH=2, D=64)
+
+    def test_varlen_gqa_mqa_d64(self):
+        # MQA: single KV head (kvH=1)
+        self._run_forward_gqa([64, 32, 48], H=8, kvH=1, D=64)
+
+    def test_varlen_gqa_fwd_2x_d128(self):
+        self._run_forward_gqa([48, 64, 32], H=4, kvH=2, D=128)
+
+    def test_varlen_gqa_fwd_causal_2x(self):
+        self._run_forward_gqa([64, 48, 32], H=8, kvH=4, D=64, causal=True)
+
+    def test_varlen_gqa_fwd_multitile_4x(self):
+        # Long seqs to force multi-tile K-loop
+        self._run_forward_gqa([200, 150, 300], H=8, kvH=2, D=64)
+
+    def test_varlen_gqa_fwd_bf16_2x(self):
+        self._run_forward_gqa([48, 64, 32], H=8, kvH=4, D=64, dtype=torch.bfloat16)
+
+    # ------------------------------------------------------------------
+    # GQA backward
+    # ------------------------------------------------------------------
+
+    def test_varlen_gqa_bwd_2x_d64(self):
+        self._run_backward_gqa([32, 48, 16], H=8, kvH=4, D=64)
+
+    def test_varlen_gqa_bwd_mqa_d64(self):
+        self._run_backward_gqa([32, 48, 16], H=8, kvH=1, D=64)
+
+    def test_varlen_gqa_bwd_2x_d128(self):
+        self._run_backward_gqa([32, 48], H=4, kvH=2, D=128)
+
+    def test_varlen_gqa_bwd_causal_2x(self):
+        self._run_backward_gqa([32, 48, 16], H=8, kvH=4, D=64, causal=True)
+
+    def test_varlen_gqa_bwd_multitile_2x(self):
+        self._run_backward_gqa([150, 200], H=8, kvH=4, D=64)
+
 instantiate_parametrized_tests(TestFlashAttentionVarlenMPS)
 
 instantiate_parametrized_tests(TestFlashAttentionMPS)

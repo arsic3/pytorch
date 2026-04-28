@@ -763,12 +763,11 @@ std::tuple<Tensor, Tensor, Tensor> _scaled_dot_product_flash_attention_for_mps_b
 
 // ---------------------------------------------------------------------------
 // FlashAttention-2 varlen forward for MPS
-// Input  Q/K/V : [total, H, D]   (packed sequences, PyG format)
-// Output O     : [total_q, H, D]
-//        LSE   : [H, total_q]    (flat: h*total_q + abs_q_row)
-// Kernels use [H, total, D] layout; we permute in/out here.
-
-
+// Input  Q   : [total_q, H,   D]  K/V : [total_k, kvH, D]  (packed, PyG format)
+// Output O   : [total_q, H,   D]
+//        LSE : [H, total_q]       (flat: h*total_q + abs_q_row)
+// gqa = H / kvH  (1 for standard MHA, >1 for GQA/MQA)
+// Kernels use [H/kvH, total, D] layout; we permute in/out here.
 // ---------------------------------------------------------------------------
 
 std::tuple<Tensor, Tensor> _scaled_dot_product_flash_attention_varlen_for_mps(
@@ -796,10 +795,15 @@ std::tuple<Tensor, Tensor> _scaled_dot_product_flash_attention_varlen_for_mps(
   const int64_t total_k = key.size(0);
   const int64_t B       = cum_seq_q.numel() - 1;
 
+  const int64_t kvH = key.size(1);
+  const int64_t gqa_factor = H / kvH;
   TORCH_CHECK(D == 64 || D == 128,
     "_scaled_dot_product_flash_attention_varlen_for_mps: head_dim must be 64 or 128, got ", D);
-  TORCH_CHECK(key.size(1) == H,
-    "_scaled_dot_product_flash_attention_varlen_for_mps: K/V heads must equal Q heads (no GQA)");
+  TORCH_CHECK(H % kvH == 0,
+    "_scaled_dot_product_flash_attention_varlen_for_mps: H must be divisible by kvH, got H=",
+    H, " kvH=", kvH);
+  TORCH_CHECK(key.size(2) == D && value.size(1) == kvH && value.size(2) == D,
+    "_scaled_dot_product_flash_attention_varlen_for_mps: K/V shape mismatch");
 
   // [total, H, D] -> [H, total, D] (contiguous for kernel)
   auto q_t = query.permute({1, 0, 2}).contiguous();
@@ -837,7 +841,8 @@ std::tuple<Tensor, Tensor> _scaled_dot_product_flash_attention_varlen_for_mps(
                   q_t, k_t, v_t, out_t, lse,
                   cu_q, cu_k,
                   (uint32_t)total_q, (uint32_t)total_k,
-                  scale_val, is_causal);
+                  scale_val, is_causal,
+                  (uint32_t)gqa_factor);
       [computeEncoder dispatchThreadgroups:grid threadsPerThreadgroup:tg];
     }
   });
@@ -875,11 +880,13 @@ _scaled_dot_product_flash_attention_varlen_for_mps_backward(
   const int64_t H       = query.size(1);
   const int64_t D       = query.size(2);
   const int64_t total_k = key.size(0);
+  const int64_t kvH     = key.size(1);
+  const int64_t gqa_factor = H / kvH;
   const int64_t B       = cum_seq_q.numel() - 1;
 
   const float scale_val = sdp::calculate_scale(query, scale).expect_float();
 
-  // [total, H, D] -> [H, total, D]
+  // [total, H/kvH, D] -> [H/kvH, total, D]
   auto q_t  = query.permute({1, 0, 2}).contiguous();
   auto k_t  = key.permute({1, 0, 2}).contiguous();
   auto v_t  = value.permute({1, 0, 2}).contiguous();
@@ -892,10 +899,10 @@ _scaled_dot_product_flash_attention_varlen_for_mps_backward(
   auto cu_q = cum_seq_q.to(at::kInt).contiguous();
   auto cu_k = cum_seq_k.to(at::kInt).contiguous();
 
-  // Outputs in [H, total, D]; permute back at the end
-  auto dQ_t  = at::zeros({H, total_q, D}, q_t.options());
-  auto dK_t  = at::zeros({H, total_k, D}, k_t.options());
-  auto dV_t  = at::zeros({H, total_k, D}, v_t.options());
+  // Outputs in [H/kvH, total, D]; permute back at the end
+  auto dQ_t  = at::zeros({H,   total_q, D}, q_t.options());
+  auto dK_t  = at::zeros({kvH, total_k, D}, k_t.options());
+  auto dV_t  = at::zeros({kvH, total_k, D}, v_t.options());
   // D_vec[h * total_q + abs_q_row] = rowsum(dO * O)
   auto D_vec = at::empty({H, total_q},
                           at::TensorOptions().dtype(at::kFloat).device(query.device()));
@@ -936,7 +943,8 @@ _scaled_dot_product_flash_attention_varlen_for_mps_backward(
                   q_t, k_t, v_t, do_t, lse, D_vec, dQ_t,
                   cu_q, cu_k,
                   (uint32_t)total_q, (uint32_t)total_k,
-                  scale_val, is_causal);
+                  scale_val, is_causal,
+                  (uint32_t)gqa_factor);
       [computeEncoder dispatchThreadgroups:MTLSizeMake((NSUInteger)H,
                                                        ((NSUInteger)max_q + BQ - 1) / BQ,
                                                        (NSUInteger)B)
@@ -955,8 +963,9 @@ _scaled_dot_product_flash_attention_varlen_for_mps_backward(
                   q_t, k_t, v_t, do_t, lse, D_vec, dK_t, dV_t,
                   cu_q, cu_k,
                   (uint32_t)total_q, (uint32_t)total_k,
-                  scale_val, is_causal);
-      [computeEncoder dispatchThreadgroups:MTLSizeMake((NSUInteger)H,
+                  scale_val, is_causal,
+                  (uint32_t)gqa_factor);
+      [computeEncoder dispatchThreadgroups:MTLSizeMake((NSUInteger)kvH,
                                                        ((NSUInteger)max_k + BK - 1) / BK,
                                                        (NSUInteger)B)
                      threadsPerThreadgroup:MTLSizeMake(32 * BK, 1, 1)];
