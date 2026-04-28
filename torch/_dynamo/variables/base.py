@@ -483,19 +483,6 @@ class VariableTracker(metaclass=VariableTrackerMeta):
         """Return True for TensorVariable instances"""
         return False
 
-    def get_handler_type_for_dispatch(self) -> type[VariableTracker]:
-        """Return the VariableTracker type to use for builtin handler dispatch.
-
-        This is used by BuiltinVariable to look up the appropriate handler for
-        a given set of arguments. Most VariableTrackers just return their own
-        type, but LazyConstantVariable returns ConstantVariable since it can
-        be treated as a constant for most builtin operations.
-
-        Subclasses that override this should install appropriate guards to
-        ensure the dispatched handler remains valid.
-        """
-        return type(self)
-
     def var_getattr(self, tx: InstructionTranslator, name: str) -> VariableTracker:
         """getattr(self, name) returning a new variable"""
         value = self.const_getattr(tx, name)
@@ -1037,6 +1024,22 @@ class VariableTracker(metaclass=VariableTrackerMeta):
                 *graph_break_hints.SUPPORTABLE,
             ],
         )
+
+    def get_id(self, tx: InstructionTranslator) -> int | None:
+        """Return id() of the underlying Python object, or None if unavailable.
+
+        The base implementation uses source resolution for sourceful VTs.
+        Subclasses override for special cases (e.g. NNModuleVariable uses
+        get_submodule, ConstantVariable handles singletons).
+        """
+        if self.source:
+            return id(tx.output.resolve_source_value(self.source))
+        return None
+
+    def get_id_guard_type(self) -> Callable[..., Any] | None:
+        if self.source:
+            return GuardBuilder.ID_MATCH
+        return None
 
     def get_real_python_backed_value(self) -> object:
         """Return the Python object this VT wraps, for `is` comparison.
