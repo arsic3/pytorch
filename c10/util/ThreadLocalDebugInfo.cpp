@@ -51,8 +51,10 @@ void ThreadLocalDebugInfo::_push(
 
 /* static */
 std::shared_ptr<DebugInfoBase> ThreadLocalDebugInfo::_pop(DebugInfoKind kind) {
-  TORCH_CHECK(debug_info && debug_info->kind_ == kind,
-              "Expected debug info of type ", kind);
+  TORCH_CHECK(
+      debug_info && debug_info->kind_ == kind,
+      "Expected debug info of type ",
+      kind);
   auto res = debug_info;
   debug_info = debug_info->parent_info_;
   return res->info_;
@@ -60,8 +62,10 @@ std::shared_ptr<DebugInfoBase> ThreadLocalDebugInfo::_pop(DebugInfoKind kind) {
 
 /* static */
 std::shared_ptr<DebugInfoBase> ThreadLocalDebugInfo::_peek(DebugInfoKind kind) {
-  TORCH_CHECK(debug_info && debug_info->kind_ == kind,
-              "Expected debug info of type ", kind);
+  TORCH_CHECK(
+      debug_info && debug_info->kind_ == kind,
+      "Expected debug info of type ",
+      kind);
   return debug_info->info_;
 }
 
@@ -94,4 +98,4 @@ DebugInfoGuard::DebugInfoGuard(std::shared_ptr<ThreadLocalDebugInfo> info) {
   active_ = true;
 }
 
-}  // namespace c10
+} // namespace c10

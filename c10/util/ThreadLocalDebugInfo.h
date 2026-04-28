@@ -61,10 +61,10 @@ class C10_API DebugInfoKind {
   static const DebugInfoKind PRODUCER_INFO;
   static const DebugInfoKind MOBILE_RUNTIME_INFO;
   static const DebugInfoKind PROFILER_STATE;
-  static const DebugInfoKind INFERENCE_CONTEXT;  // for inference usage
+  static const DebugInfoKind INFERENCE_CONTEXT; // for inference usage
   static const DebugInfoKind PARAM_COMMS_INFO;
-  static const DebugInfoKind TEST_INFO;    // used only in tests
-  static const DebugInfoKind TEST_INFO_2;  // used only in tests
+  static const DebugInfoKind TEST_INFO; // used only in tests
+  static const DebugInfoKind TEST_INFO_2; // used only in tests
 
   // Comparison operators. These allow putting DebugInfoKind in containers like
   // std::set and std::map.
@@ -78,7 +78,8 @@ class C10_API DebugInfoKind {
     return value_ < other.value_;
   }
 
-  friend std::ostream& operator<<(std::ostream& os, const DebugInfoKind& kind);
+  C10_API friend std::ostream& operator<<(std::ostream& os,
+                                          const DebugInfoKind& kind);
 
  private:
   // Doesn't compile in a constexpr context; throws in a non-constexpr context.
@@ -182,4 +183,4 @@ class C10_API DebugInfoGuard {
   std::shared_ptr<ThreadLocalDebugInfo> prev_info_ = nullptr;
 };
 
-}  // namespace c10
+} // namespace c10

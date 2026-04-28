@@ -99,5 +99,5 @@ TEST(DebugInfoKind, CanBePutInSet) {
   EXPECT_TRUE(kinds.contains(DebugInfoKind::PROFILER_STATE));
 }
 
-}  // namespace
-}  // namespace c10
+} // namespace
+} // namespace c10
