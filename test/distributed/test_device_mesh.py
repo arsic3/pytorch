@@ -73,6 +73,11 @@ def _with_torchcomm_env(func):
         os.environ["TORCHCOMM_RANK"] = str(self.rank)
         os.environ["TORCHCOMM_SIZE"] = str(self.world_size)
         os.environ["TORCHCOMM_STORE_PATH"] = self.file_name
+        # torchcomms' StoreManager unconditionally requires MASTER_ADDR /
+        # MASTER_PORT (TORCHCOMM_STORE_PATH no longer suffices after the
+        # StoreManager refactor in torchcomms #971).
+        os.environ["MASTER_ADDR"] = "localhost"
+        os.environ["MASTER_PORT"] = "25901"
         try:
             return func(self, *args, **kwargs)
         finally:
@@ -1542,6 +1547,34 @@ class DeviceMeshCollectiveTest(DTensorTestBase):
             torch.ones(3, 3, device=self.device_type) * self.world_size
         )
         self.assertEqual(gpu_tensor, expected_gpu_tensor)
+
+        # No-op split should preserve both backends and produce identical
+        # results to the parent.
+        split_group_no_op = dist.split_group(pg, [ranks])
+        cpu_tensor = torch.ones(3, 3)
+        dist.all_reduce(cpu_tensor, group=split_group_no_op)
+        self.assertEqual(cpu_tensor, expected_cpu_tensor)
+        gpu_tensor = torch.ones(3, 3, device=self.device_type)
+        dist.all_reduce(gpu_tensor, group=split_group_no_op)
+        self.assertEqual(gpu_tensor, expected_gpu_tensor)
+
+        # Real split with multiple sub-groups; each sub-group must keep both
+        # cpu:gloo and cuda:ncclx backends and dispatch to the right one based
+        # on tensor device.
+        pg_ranks_by_dim = torch.arange(self.world_size).view(2, 4)
+        split_pg = dist.split_group(pg, pg_ranks_by_dim.tolist())
+        expected_split_size = self.world_size // 2
+
+        cpu_tensor = torch.ones(3, 3)
+        dist.all_reduce(cpu_tensor, group=split_pg)
+        self.assertEqual(cpu_tensor, torch.ones(3, 3) * expected_split_size)
+
+        gpu_tensor = torch.ones(3, 3, device=self.device_type)
+        dist.all_reduce(gpu_tensor, group=split_pg)
+        self.assertEqual(
+            gpu_tensor,
+            torch.ones(3, 3, device=self.device_type) * expected_split_size,
+        )
 
     @unittest.skipIf(not _TORCHCOMM_AVAILABLE, "TorchComms is not installed")
     @dist_config.patch(use_torchcomms=True)
