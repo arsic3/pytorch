@@ -5,7 +5,10 @@ from typing import Any, TYPE_CHECKING
 import sympy
 
 from ..ir import get_free_symbols
-from ..kernel.mm import decompose_k_subgraph_template
+from ..kernel.mm import (
+    decompose_k_addmm_subgraph_template,
+    decompose_k_subgraph_template,
+)
 from ..kernel_inputs import KernelInputs, MMKernelInputs
 from ..utils import get_k_splits
 from ..virtualized import V
@@ -70,3 +73,55 @@ class DecomposeKConfigHeuristics(GemmMaxAutotuneTemplateConfigHeuristics):
             ):
                 continue
             yield {"k_split": k_split}
+
+
+@register_template_heuristic(
+    decompose_k_addmm_subgraph_template.uid, None, op_name="addmm"
+)
+class EmptyDecomposeKAddMMConfigHeuristics(TemplateConfigHeuristics):
+    """empty heuristics to skip decompose k addmm on anything not cuda"""
+
+
+@register_template_heuristic(
+    decompose_k_addmm_subgraph_template.uid,
+    "cuda",
+    op_name="addmm",
+)
+class DecomposeKAddMMConfigHeuristics(GemmMaxAutotuneTemplateConfigHeuristics):
+    def _get_template_configs_impl(
+        self,
+        kernel_inputs: KernelInputs,
+        op_name: str,
+    ) -> Generator[dict[str, Any], None, None]:
+        assert isinstance(kernel_inputs, MMKernelInputs), (
+            f"{self.__class__.__name__} requires MMKernelInputs"
+        )
+
+        unbacked_symbols = any(
+            len(get_free_symbols(itr, unbacked_only=True)) > 0
+            for itr in (
+                *kernel_inputs.shapes_symbolic(),
+                *kernel_inputs.strides_symbolic(),
+            )
+        )
+        if unbacked_symbols:
+            return
+
+        m, n, k = kernel_inputs.mnk_symbolic()
+        k_splits = get_k_splits(m, n, k)
+        for k_split in k_splits:
+            if not V.graph.sizevars.statically_known_true(
+                sympy.Eq(sympy.Mod(k, k_split), 0)
+            ):
+                continue
+            yield {"k_split": k_split}
+
+    def get_extra_kwargs(
+        self,
+        kernel_inputs: KernelInputs,
+        op_name: str,
+    ) -> dict[str, Any]:
+        return {
+            "alpha": kernel_inputs.get_scalar("alpha"),
+            "beta": kernel_inputs.get_scalar("beta"),
+        }

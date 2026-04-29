@@ -207,7 +207,8 @@ def check_supported_striding(mat_a, mat_b) -> None:
 aten_bias_addmm = ExternKernelChoice(bias_addmm, None)
 
 
-def decomposeK(a, b, k_splits):
+def _decomposeK_core(a, b, k_splits):
+    """Shared core: reshape, batched matmul, sum-reduce over the split dimension."""
     m = a.shape[0]
     n = b.shape[1]
     k = a.shape[1]
@@ -217,8 +218,11 @@ def decomposeK(a, b, k_splits):
     a_reshaped = torch.permute(a.reshape(m, B, k_parts), (1, 0, 2))
     b_reshaped = b.reshape(B, k_parts, n)
     result = torch.bmm(a_reshaped, b_reshaped, out_dtype=torch.float32)
-    reduced_buf = torch.sum(result, 0)
-    return reduced_buf.to(a.dtype)
+    return torch.sum(result, 0)
+
+
+def decomposeK(a, b, k_splits):
+    return _decomposeK_core(a, b, k_splits).to(a.dtype)
 
 
 class DecomposeKSugraphTemplate(SubgraphTemplate):
@@ -257,6 +261,54 @@ class DecomposeKSugraphTemplate(SubgraphTemplate):
 
 
 decompose_k_subgraph_template = DecomposeKSugraphTemplate()
+
+
+def decomposeK_addmm(bias, a, b, k_splits, alpha=1, beta=1):
+    reduced_buf = _decomposeK_core(a, b, k_splits)
+    out = reduced_buf * alpha + bias.float() * beta
+    return out.to(a.dtype)
+
+
+class DecomposeKAddMMSubgraphTemplate(SubgraphTemplate):
+    def __init__(self):
+        super().__init__(
+            name="decompose_k_addmm",
+        )
+
+    def generate(  # type: ignore[override]
+        self,
+        input_nodes: list[Buffer],
+        layout: Layout,
+        k_split: int,
+        alpha: int = 1,
+        beta: int = 1,
+    ) -> SubgraphChoiceCaller:
+        from torch._dispatch.python import enable_python_dispatcher
+
+        from ..decomposition import select_decomp_table
+
+        name = f"decompose_k_addmm_{k_split}_split"
+        description = f"{k_split=}"
+
+        with enable_python_dispatcher():
+            decompositions = select_decomp_table()
+            fn = make_fx(
+                functools.partial(
+                    decomposeK_addmm, k_splits=k_split, alpha=alpha, beta=beta
+                ),
+                decompositions,
+            )
+
+            return super().generate(
+                name=name,
+                input_nodes=input_nodes,
+                layout=layout,
+                make_fx_graph=fn,
+                description=description,
+            )
+
+
+decompose_k_addmm_subgraph_template = DecomposeKAddMMSubgraphTemplate()
 
 
 class ContiguousTemplate(SubgraphTemplate):
@@ -683,6 +735,9 @@ def tuned_addmm(inp, mat1, mat2, *, alpha=1, beta=1, layout=None):
         )
 
     if is_nonzero and use_triton_template(layout, check_max_autotune=False):
+        if use_decompose_k_choice(m, n, k):
+            templates_to_use.append(decompose_k_addmm_subgraph_template)
+
         templates_to_use.append(mm_template)
 
         if use_triton_blackwell_tma_template(
