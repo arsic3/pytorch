@@ -167,6 +167,12 @@ def pysequence_check(obj_type: type) -> bool:
     return type_implements_sq_item(obj_type)
 
 
+def type_mapping_check(obj_type: type) -> bool:
+    """Implements PyMapping_Check semantics for VariableTracker objects."""
+    _, map_slots, _, _ = _get_cached_slots(obj_type)
+    return has_slot(map_slots, PyMappingSlots.MP_SUBSCRIPT)
+
+
 def maybe_get_python_type(obj: VariableTracker) -> type:
     try:
         return obj.python_type()
@@ -180,6 +186,11 @@ def maybe_get_python_type(obj: VariableTracker) -> type:
                 *graph_break_hints.DYNAMO_BUG,
             ],
         )
+
+
+def type_implements_sq_contains(obj_type: type) -> bool:
+    seq_slots, _, _, _ = _get_cached_slots(obj_type)
+    return has_slot(seq_slots, PySequenceSlots.SQ_CONTAINS)
 
 
 def vt_mapping_size(
@@ -411,3 +422,24 @@ def generic_getiter(
         )
     else:
         raise_type_error(tx, f"'{obj.python_type_name()}' object is not iterable")
+
+
+def generic_contains(
+    tx: "InstructionTranslator", obj: "VariableTracker", item: "VariableTracker"
+) -> "VariableTracker":
+    """
+    Implements PySequence_Contains semantics for VariableTracker objects.
+
+    If the object has sq_contains (i.e., __contains__), calls obj.sq_contains(tx, item).
+    Otherwise falls back to iterating over obj and comparing each element.
+    """
+    # ref: https://github.com/python/cpython/blob/v3.13.0/Objects/abstract.c#L2272-L2283
+    T = maybe_get_python_type(obj)
+    if type_implements_sq_contains(T):
+        return obj.sq_contains(tx, item)
+    else:
+        # iter fallback handles both __iter__ and __getitem__ sequence protocol cases
+        it = generic_getiter(tx, obj)
+        return UserFunctionVariable(polyfills.impl_CONTAINS_OP_fallback).call_function(
+            tx, [item, it], {}
+        )

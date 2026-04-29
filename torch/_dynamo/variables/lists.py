@@ -147,6 +147,14 @@ class BaseListVariable(VariableTracker):
         """Sequence length for lists, tuples, and range objects."""
         return VariableTracker.build(tx, len(self.items))
 
+    def sq_contains(
+        self, tx: "InstructionTranslator", item: VariableTracker
+    ) -> VariableTracker:
+        # ref: https://github.com/python/cpython/blob/v3.13.0/Objects/listobject.c#L635-L652
+        # TODO(dynamo-team): Replace iter_contains by a proper impl. once we
+        # implement PyObject_RichCompare
+        return iter_contains(self.unpack_var_sequence(tx), item, tx)
+
     def call_tree_map_branch(
         self,
         tx: "InstructionTranslator",
@@ -274,7 +282,7 @@ class BaseListVariable(VariableTracker):
     ) -> VariableTracker:
         from .builder import SourcelessBuilder
 
-        if name == "__contains__":
+        if name == "__getitem__":
             if kwargs or len(args) != 1:
                 raise_args_mismatch(
                     tx,
@@ -282,7 +290,29 @@ class BaseListVariable(VariableTracker):
                     "1 args and 0 kwargs",
                     f"{len(args)} args and {len(kwargs)} kwargs",
                 )
-            return iter_contains(self.unpack_var_sequence(tx), args[0], tx)
+
+            value = args[0]
+
+            try:
+                value_type = value.python_type()
+            except NotImplementedError:
+                value_type = None
+            if value_type not in (int, bool, slice):
+                # CPython: list_subscript checks _PyIndex_Check first, and
+                # raises its own error if the type doesn't have nb_index.
+                # Only if the type has __index__ does it call PyNumber_AsSsize_t.
+                if value_type is not None and not hasattr(value_type, "__index__"):
+                    container_name = self.python_type_name()
+                    raise_observed_exception(
+                        TypeError,
+                        tx,
+                        args=[
+                            f"{container_name} indices must be integers or slices, not {value.python_type_name()}"
+                        ],
+                    )
+                value = value.nb_index_impl(tx)
+
+            return self.getitem_const(tx, value)
         elif name == "index":
             if not len(args):
                 raise_args_mismatch(
@@ -684,6 +714,12 @@ class RangeVariable(BaseListVariable):
             key = key.nb_index_impl(tx)
         return self.getitem_const(tx, key)
 
+    def sq_contains(
+        self, tx: "InstructionTranslator", item: VariableTracker
+    ) -> VariableTracker:
+        # ref: https://github.com/python/cpython/blob/v3.13.0/Objects/rangeobject.c#L482-L490
+        return VariableTracker.build(tx, self.range_count(item))
+
     def tp_iter_impl(self, tx: "InstructionTranslator") -> VariableTracker:
         # ref: https://github.com/python/cpython/blob/v3.13.3/Objects/rangeobject.c#L896-L927
         if not all(var.is_python_constant() for var in self.items):
@@ -704,7 +740,7 @@ class RangeVariable(BaseListVariable):
     ) -> VariableTracker:
         from .builder import SourcelessBuilder
 
-        if name in ("count", "__contains__"):
+        if name == "count":
             return SourcelessBuilder.create(tx, self.range_count(*args))
         elif name == "index":
             x = args[0].as_python_constant()
