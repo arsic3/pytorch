@@ -351,6 +351,47 @@ return tmp_1, D""",
     @skipXPUIf(not Xe2_Or_Later, "Unsupported platform")
     @skipCUDAIf(not SM90OrLater, "need sm_90")
     @unittest.skipIf(not try_import_cutlass(), "requires cutlass")
+    def test_py_codegen_silu(self):
+        """Test EVT codegen for SiLU decomposition: x / (1 + exp(-x))."""
+        from torch._inductor.codegen.cutlass.python_evt import CutlassEVTCodegen
+        from torch._inductor.virtualized import ops, V
+
+        size = (100, 300, 200)
+        buf0 = MockComputedBuffer("buf0", None, torch.float32, size)
+
+        def inner_fn_silu(index):
+            x = buf0.make_loader()(index)
+            one = ops.constant(1, torch.float32)
+            return x / (one + ops.exp(-x))
+
+        buf1 = MockComputedBuffer("buf1", inner_fn_silu, torch.float32, size)
+        with V.set_graph_handler(
+            MockGraphHandler({"buf0": buf0, "buf1": buf1})
+        ):
+            reads, writes, renames, code = CutlassEVTCodegen.ir_to_evt_python_code(
+                "buf0",
+                [MockSchedulerNode(buf1)],
+                OrderedSet([]),
+            )
+        self.assertExpectedInline(reads, """[]""")
+        self.assertExpectedInline(writes, """['buf0', 'buf1']""")
+        self.assertExpectedInline(
+            code,
+            """\
+def fn(accum):
+    tmp_0 = accum
+    tmp_1 = 1
+    tmp_2 = -tmp_0
+    tmp_3 = exp(tmp_2)
+    tmp_4 = tmp_1 + tmp_3
+    D = tmp_0 / tmp_4
+
+return tmp_0, D""",
+        )
+
+    @skipXPUIf(not Xe2_Or_Later, "Unsupported platform")
+    @skipCUDAIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not try_import_cutlass(), "requires cutlass")
     def test_example_tensor_creation(self):
         from torch._inductor.codegen.cutlass.lib_extensions.evt_extensions import (
             create_example_tensors,

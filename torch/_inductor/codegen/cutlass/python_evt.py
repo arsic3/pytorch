@@ -64,7 +64,11 @@ class CutlassEVTOpsMixIn:
 
     @staticmethod
     def constant(value: Any, dtype: Any) -> str:
-        raise NotImplementedError
+        return str(value)
+
+    @staticmethod
+    def neg(x0: str) -> str:
+        return f"-{x0}"
 
     @staticmethod
     def mul(x0: str, x1: str) -> str:
