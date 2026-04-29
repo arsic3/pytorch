@@ -39,11 +39,13 @@ from .ctx_manager import (
     FSDPParamGroupUseTrainingStateVariable,
     FxTracebackAnnotateVariable,
     GenericContextWrappingVariable,
+    get_device_context_manager,
     GradIncrementNestingCtxManagerVariable,
     GradInplaceRequiresGradCtxManagerVariable,
     GradModeVariable,
     InferenceModeVariable,
     JvpIncrementNestingCtxManagerVariable,
+    register_device_context_manager,
     SDPAKernelVariable,
     SetFwdGradEnabledContextManager,
     TemporarilyPopInterpreterStackCtxManagerVariable,
@@ -187,6 +189,8 @@ from .user_defined import (
 
 
 __all__ = [
+    "register_device_context_manager",
+    "get_device_context_manager",
     "XPUDeviceVariable",
     "AcceleratorDeviceIndexVariable",
     "AutogradFunctionContextVariable",
