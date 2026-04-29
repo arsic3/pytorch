@@ -513,8 +513,7 @@ class MapVariable(IteratorVariable):
                     it_j = self.iterable.items[j]
                     if not is_iterator_exhausted(tx, it_j):
                         raise_value_error(
-                            tx,
-                            f"map() argument {j + 1} is longer than argument {j}"
+                            tx, f"map() argument {j + 1} is longer than argument {j}"
                         )
 
                 raise_observed_exception(StopIteration, tx)
