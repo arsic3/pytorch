@@ -3,10 +3,12 @@
 import importlib.util
 import unittest
 
-from sympy import I, Max, Min, Symbol, sympify
+from sympy import I, Integer, Max, Min, Symbol, sympify
 
 import torch
+from torch._dynamo.source import ConstantSource
 from torch._inductor.fx_utils import count_flops_fx, countable_fx
+from torch._inductor.ir import Layout
 from torch._inductor.utils import get_device_tflops, sympy_str, sympy_subs
 from torch._inductor.virtualized import V
 from torch.testing._internal.common_device_type import (
@@ -18,6 +20,7 @@ from torch.testing._internal.common_utils import (
     TestCase,
     xfailIfNoAcceleratorTriton,
 )
+from torch.testing._internal.inductor_utils import dummy_graph
 from torch.utils._sympy.functions import Identity
 
 
@@ -244,6 +247,33 @@ class TestUtils(TestCase):
     def test_get_device_tflops(self, dtype):
         ret = get_device_tflops(dtype)
         self.assertTrue(type(ret) is float)
+
+    def test_is_channels_last_contiguous_sympy(self):
+        graph = dummy_graph()
+        shape_env = graph.sizevars.shape_env
+        n = shape_env.create_symbol(8, source=ConstantSource("n"))
+        h = shape_env.create_symbol(16, source=ConstantSource("h"))
+        w = shape_env.create_symbol(16, source=ConstantSource("w"))
+        c = Integer(3)
+        with V.set_graph_handler(graph):
+            # 4D NHWC — channels last
+            self.assertTrue(
+                Layout.is_channels_last_contiguous(
+                    (n, c, h, w), (c * h * w, Integer(1), w * c, c)
+                )
+            )
+            # 4D NCHW — not channels last
+            self.assertFalse(
+                Layout.is_channels_last_contiguous(
+                    (n, c, h, w), (c * h * w, h * w, w, Integer(1))
+                )
+            )
+            # 4D C=1 — ambiguous, returns False
+            self.assertFalse(
+                Layout.is_channels_last_contiguous(
+                    (n, Integer(1), h, w), (h * w, Integer(1), w, Integer(1))
+                )
+            )
 
 
 instantiate_device_type_tests(TestUtils, globals(), allow_xpu=True)

@@ -3999,7 +3999,9 @@ class Layout(OutputSpec):
         shape: Sequence[_IntLike], strides: Sequence[_IntLike]
     ) -> bool:
         ndim = len(shape)
-        if ndim not in [4, 5] or shape[1] == 1:
+        if ndim not in [4, 5]:
+            return False
+        if V.graph.sizevars.is_size_one_or_false(shape[1]):
             return False
         for left, right, size in zip(
             # pyrefly: ignore [bad-specialization]
@@ -4008,7 +4010,9 @@ class Layout(OutputSpec):
             make_channels_last_strides_for(shape),
             shape,
         ):
-            if size != 1 and left != right:
+            if not V.graph.sizevars.is_size_one_or_false(
+                size
+            ) and not V.graph.sizevars.statically_known_equals(left, right):
                 return False
         return True
 
@@ -6093,13 +6097,11 @@ class ConcatKernel(NopKernel):
             and any(
                 # pyrefly: ignore [missing-attribute]
                 "val" in arg.meta
-                and (
+                and Layout.is_channels_last_contiguous(
                     # pyrefly: ignore [missing-attribute]
-                    arg.meta["val"].is_contiguous(memory_format=torch.channels_last)
+                    convert_shape_to_inductor(arg.meta["val"].size()),
                     # pyrefly: ignore [missing-attribute]
-                    or arg.meta["val"].is_contiguous(
-                        memory_format=torch.channels_last_3d
-                    )
+                    convert_shape_to_inductor(arg.meta["val"].stride()),
                 )
                 for arg in fx_node_args
             )
