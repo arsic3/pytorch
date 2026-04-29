@@ -25,7 +25,7 @@ namespace c10 {
 //   const DebugInfoBase* info = ThreadLocalDebugInfo::get(kMyCustomInfo);
 //   ...
 //   ThreadLocalDebugInfo::_pop(kMyCustomInfo);
-class C10_API DebugInfoKind {
+class DebugInfoKind {
  private:
   // Must be a non-null pointer to a string_view literal with static storage
   // duration.
