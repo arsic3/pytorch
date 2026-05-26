@@ -124,99 +124,99 @@ aiter::mha_bwd_args get_ck_fmha_bwd_args(const mask_info &mask,
 
     float p_undrop = 1.0 - p_dropout;
 
+    (void)dq_acc;
+    (void)stride_dq_acc;
+    (void)nhead_stride_dq_acc;
+    (void)batch_stride_dq_acc;
+    (void)split_stride_dq_acc;
+
     return aiter::mha_bwd_args{
-        // aiter args
-        static_cast<int>(mask.type),
-        true,   // use_asm_v3
-        true,   // v3_atomic_fp32
-        1,      // v3_bf16_cvt
-        false,  // v3_api_check
+        .use_asm_v3 = true,
+        .v3_atomic_fp32 = true,
+        .v3_bf16_cvt = 1,
+        .v3_api_check = false,
 
-        // From ck fmha_bwd_traits
-        hdim,   // hdim_q
-        hdim,   // hdim_v
-        dtype,  // data_type
-        false,  // is_group_mode
-        static_cast<int>(mask.type),  // ck_mask_type
-        enable_bias ? static_cast<int>(bias_enum::elementwise_bias) : static_cast<int>(bias_enum::no_bias),
-        bias_requires_grad,  // has_dbias
-        has_dropout,
-        false,  // is_store_randval
-        deterministic,  // is_deterministic
+        .hdim_q = hdim,
+        .hdim_v = hdim,
+        .data_type = dtype,
+        .is_group_mode = false,
+        .mask_type = static_cast<int>(mask.type),
+        .bias_type = enable_bias ? static_cast<int>(bias_enum::elementwise_bias)
+                                 : static_cast<int>(bias_enum::no_bias),
+        .has_dbias = bias_requires_grad,
+        .has_dropout = has_dropout,
+        .is_store_randval = false,
+        .is_deterministic = deterministic,
 
-        // From ck fmha_bwd_args
-        q.data_ptr(),
-        k.data_ptr(),
-        v.data_ptr(),
-        attn_bias_ptr,
-        out.data_ptr(),  // o_ptr
-        softmax_lse.data_ptr(),  // lse_ptr
-        dout.data_ptr(),  // do_ptr
-        d.data_ptr(),
-        nullptr,  // rand_val_ptr
-        dq.data_ptr(),
-        dk.data_ptr(),
-        dv.data_ptr(),
-        dbias_ptr,
-        dq_acc.data_ptr(),  // dq_acc_ptr
-        nullptr,  // seqstart_q_ptr
-        nullptr,  // seqstart_k_ptr
-        nullptr,  // seqlen_q_ptr
-        nullptr,  // seqlen_k_ptr
-        nullptr,  // cu_seqlen_q_ptr
-        nullptr,  // cu_seqlen_k_ptr
-        seqlen_q,
-        seqlen_k,
-        b,  // batch
-        seqlen_q,  // max_seqlen_q
-        seqlen_k,  // max_seqlen_k
-        h,  // nhead_q
-        h_k,  // nhead_k
-        softmax_scale,  // scale
-        stride_q,
-        stride_k,
-        stride_v,
-        stride_attn_bias,  // stride_bias
-        stride_o,
-        0,  // stride_randval
-        stride_do,
-        stride_dq_acc,
-        stride_dq,
-        stride_dk,
-        stride_dv,
-        stride_dbias,
-        nhead_stride_q,
-        nhead_stride_k,
-        nhead_stride_v,
-        nhead_stride_bias,
-        nhead_stride_o,
-        0,  // nhead_stride_randval
-        nhead_stride_do,
-        nhead_stride_lse,
-        nhead_stride_dq_acc,
-        nhead_stride_dq,
-        nhead_stride_dk,
-        nhead_stride_dv,
-        nhead_stride_dbias,
-        batch_stride_q,
-        batch_stride_k,
-        batch_stride_v,
-        batch_stride_bias,
-        batch_stride_o,
-        0,  // batch_stride_randval
-        batch_stride_do,
-        batch_stride_lse,
-        batch_stride_dq_acc,
-        batch_stride_dq,
-        batch_stride_dk,
-        batch_stride_dv,
-        batch_stride_dbias,
-        split_stride_dq_acc,
-        mask.left,  // window_size_left
-        mask.right,  // window_size_right
-        p_dropout,  // p_drop
-        p_undrop,
-        drop_seed_offset
+        .q_ptr = q.data_ptr(),
+        .k_ptr = k.data_ptr(),
+        .v_ptr = v.data_ptr(),
+        .bias_ptr = attn_bias_ptr,
+        .o_ptr = out.data_ptr(),
+        .lse_ptr = softmax_lse.data_ptr(),
+        .do_ptr = dout.data_ptr(),
+        .d_ptr = d.data_ptr(),
+        .rand_val_ptr = nullptr,
+        .dq_ptr = dq.data_ptr(),
+        .dk_ptr = dk.data_ptr(),
+        .dv_ptr = dv.data_ptr(),
+        .dbias_ptr = dbias_ptr,
+        .sink_ptr = nullptr,
+        .d_sink_ptr = nullptr,
+        .seqstart_q_ptr = nullptr,
+        .seqstart_k_ptr = nullptr,
+        .seqlen_q_ptr = nullptr,
+        .seqlen_k_ptr = nullptr,
+        .cu_seqlen_q_ptr = nullptr,
+        .cu_seqlen_k_ptr = nullptr,
+        .seqlen_q = seqlen_q,
+        .seqlen_k = seqlen_k,
+        .batch = b,
+        .max_seqlen_q = seqlen_q,
+        .max_seqlen_k = seqlen_k,
+        .nhead_q = h,
+        .nhead_k = h_k,
+        .scale = softmax_scale,
+        .stride_q = stride_q,
+        .stride_k = stride_k,
+        .stride_v = stride_v,
+        .stride_bias = stride_attn_bias,
+        .stride_o = stride_o,
+        .stride_randval = 0,
+        .stride_do = stride_do,
+        .stride_dq = stride_dq,
+        .stride_dk = stride_dk,
+        .stride_dv = stride_dv,
+        .stride_dbias = stride_dbias,
+        .nhead_stride_q = nhead_stride_q,
+        .nhead_stride_k = nhead_stride_k,
+        .nhead_stride_v = nhead_stride_v,
+        .nhead_stride_bias = nhead_stride_bias,
+        .nhead_stride_o = nhead_stride_o,
+        .nhead_stride_randval = 0,
+        .nhead_stride_do = nhead_stride_do,
+        .nhead_stride_lsed = nhead_stride_lse,
+        .nhead_stride_dq = nhead_stride_dq,
+        .nhead_stride_dk = nhead_stride_dk,
+        .nhead_stride_dv = nhead_stride_dv,
+        .nhead_stride_dbias = nhead_stride_dbias,
+        .batch_stride_q = batch_stride_q,
+        .batch_stride_k = batch_stride_k,
+        .batch_stride_v = batch_stride_v,
+        .batch_stride_bias = batch_stride_bias,
+        .batch_stride_o = batch_stride_o,
+        .batch_stride_randval = 0,
+        .batch_stride_do = batch_stride_do,
+        .batch_stride_lsed = batch_stride_lse,
+        .batch_stride_dq = batch_stride_dq,
+        .batch_stride_dk = batch_stride_dk,
+        .batch_stride_dv = batch_stride_dv,
+        .batch_stride_dbias = batch_stride_dbias,
+        .window_size_left = mask.left,
+        .window_size_right = mask.right,
+        .p_drop = p_dropout,
+        .p_undrop = p_undrop,
+        .drop_seed_offset = drop_seed_offset,
     };
 }
 

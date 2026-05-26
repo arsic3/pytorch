@@ -16,18 +16,34 @@ fmha_bwd_traits get_ck_fmha_varlen_bwd_traits(const mask_info &mask,
                                               bool has_dropout,
                                               bool enable_bias,
                                               bool deterministic,
-                                              bool bias_requires_grad)
+                                              bool bias_requires_grad,
+                                              int batch,
+                                              int max_seqlen_q,
+                                              int max_seqlen_k,
+                                              int nhead_q,
+                                              int nhead_k,
+                                              int total_q,
+                                              int total_k)
 {
-    return fmha_bwd_traits{head_size,
-                           head_size,
-                           dtype,
-                           true, // is_group_mode
-                           mask.type,
-                           enable_bias ? bias_enum::elementwise_bias : bias_enum::no_bias,
-                           bias_requires_grad,    // has_dbias
-                           has_dropout,
-                           false, // s_randval
-                           deterministic};
+    return fmha_bwd_traits{
+        .seqlen_q = total_q,
+        .seqlen_k = total_k,
+        .batch = batch,
+        .max_seqlen_q = max_seqlen_q,
+        .max_seqlen_k = max_seqlen_k,
+        .hdim_q = head_size,
+        .hdim_v = head_size,
+        .nhead_q = nhead_q,
+        .nhead_k = nhead_k,
+        .data_type = dtype,
+        .is_group_mode = true,
+        .mask_type = mask.type,
+        .bias_type = enable_bias ? bias_enum::elementwise_bias : bias_enum::no_bias,
+        .has_dbias = bias_requires_grad,
+        .has_dropout = has_dropout,
+        .is_store_randval = false,
+        .is_deterministic = deterministic,
+    };
 }
 
 fmha_bwd_args get_ck_fmha_varlen_bwd_args(const mask_info &mask,
@@ -148,81 +164,86 @@ fmha_bwd_args get_ck_fmha_varlen_bwd_args(const mask_info &mask,
         batch_stride_dbias = dbias.stride(0);
     }
 
-    return fmha_bwd_args{q.data_ptr(),
-                         k.data_ptr(),
-                         v.data_ptr(),
-                         attn_bias_ptr, // bias
-                         out.data_ptr(),
-                         softmax_lse.data_ptr(),
-                         dout.data_ptr(),
-                         d.data_ptr(),
-                         nullptr, // rand_val
-                         dq.data_ptr(),
-                         dk.data_ptr(),
-                         dv.data_ptr(),
-                         dbias_ptr, // dbias
-                         dq_acc.data_ptr(), // dq_acc
-                         seqlens_q.data_ptr(), // seqstart_q
-                         seqlens_k.data_ptr(), // seqstart_k
-                         nullptr, // seqlen_q_ptr
-                         nullptr, // seqlen_k_ptr
-                         nullptr, // cu_seqlen_q_ptr
-                         nullptr, // cu_seqlen_k_ptr
-                         total_q,
-                         total_k,
-                         b,
-                         max_seqlen_q, // max_seqlen_q
-                         max_seqlen_k, // max_seqlen_k
-                         hdim, // hdim_q
-                         hdim, // hdim_v
-                         h, // nhead
-                         h_k, // nhead_k
-                         softmax_scale,
-                         stride_q,
-                         stride_k,
-                         stride_v,
-                         stride_attn_bias,
-                         stride_o,
-                         0, // stride_randval
-                         stride_do,
-                         stride_dq_acc,
-                         stride_dq,
-                         stride_dk,
-                         stride_dv,
-                         stride_dbias, // stride_dbias
-                         nhead_stride_q,
-                         nhead_stride_k,
-                         nhead_stride_v,
-                         nhead_stride_bias, // nhead_stride_bias
-                         nhead_stride_o,
-                         0, // nhead_stride_randval
-                         nhead_stride_do,
-                         nhead_stride_lse,
-                         nhead_stride_dq_acc,
-                         nhead_stride_dq,
-                         nhead_stride_dk,
-                         nhead_stride_dv,
-                         nhead_stride_dbias, // nhead_stride_dbias
-                         batch_stride_q,
-                         batch_stride_k,
-                         batch_stride_v,
-                         batch_stride_bias, // batch_stride_bias
-                         batch_stride_o,
-                         0, // batch_stride_randval
-                         batch_stride_do,
-                         batch_stride_lse,
-                         batch_stride_dq_acc,
-                         batch_stride_dq,
-                         batch_stride_dk,
-                         batch_stride_dv,
-                         batch_stride_dbias, // batch_stride_dbias
-                         split_stride_dq_acc,
-                         mask.left,
-                         mask.right,
-                         static_cast<ck_tile::index_t>(mask.type),
-                         p_dropout,
-                         p_undrop,
-                         drop_seed_offset};
+    (void)dq_acc;
+    (void)stride_dq_acc;
+    (void)nhead_stride_dq_acc;
+    (void)batch_stride_dq_acc;
+    (void)split_stride_dq_acc;
+
+    return fmha_bwd_args{
+        .q_ptr = q.data_ptr(),
+        .k_ptr = k.data_ptr(),
+        .v_ptr = v.data_ptr(),
+        .bias_ptr = attn_bias_ptr,
+        .o_ptr = out.data_ptr(),
+        .lse_ptr = softmax_lse.data_ptr(),
+        .do_ptr = dout.data_ptr(),
+        .d_ptr = d.data_ptr(),
+        .rand_val_ptr = nullptr,
+        .dq_ptr = dq.data_ptr(),
+        .dk_ptr = dk.data_ptr(),
+        .dv_ptr = dv.data_ptr(),
+        .dbias_ptr = dbias_ptr,
+        .workspace_ptr = nullptr,
+        .sink_ptr = nullptr,
+        .d_sink_ptr = nullptr,
+        .seqstart_q_ptr = seqlens_q.data_ptr(),
+        .seqstart_k_ptr = seqlens_k.data_ptr(),
+        .seqlen_q_ptr = nullptr,
+        .seqlen_k_ptr = nullptr,
+        .cu_seqlen_q_ptr = nullptr,
+        .cu_seqlen_k_ptr = nullptr,
+        .seqlen_q = total_q,
+        .seqlen_k = total_k,
+        .batch = b,
+        .max_seqlen_q = max_seqlen_q,
+        .max_seqlen_k = max_seqlen_k,
+        .hdim_q = hdim,
+        .hdim_v = hdim,
+        .nhead_q = h,
+        .nhead_k = h_k,
+        .scale = softmax_scale,
+        .stride_q = stride_q,
+        .stride_k = stride_k,
+        .stride_v = stride_v,
+        .stride_bias = stride_attn_bias,
+        .stride_o = stride_o,
+        .stride_randval = 0,
+        .stride_do = stride_do,
+        .stride_dq = stride_dq,
+        .stride_dk = stride_dk,
+        .stride_dv = stride_dv,
+        .stride_dbias = stride_dbias,
+        .nhead_stride_q = nhead_stride_q,
+        .nhead_stride_k = nhead_stride_k,
+        .nhead_stride_v = nhead_stride_v,
+        .nhead_stride_bias = nhead_stride_bias,
+        .nhead_stride_o = nhead_stride_o,
+        .nhead_stride_randval = 0,
+        .nhead_stride_do = nhead_stride_do,
+        .nhead_stride_lsed = nhead_stride_lse,
+        .nhead_stride_dq = nhead_stride_dq,
+        .nhead_stride_dk = nhead_stride_dk,
+        .nhead_stride_dv = nhead_stride_dv,
+        .nhead_stride_dbias = nhead_stride_dbias,
+        .batch_stride_q = batch_stride_q,
+        .batch_stride_k = batch_stride_k,
+        .batch_stride_v = batch_stride_v,
+        .batch_stride_bias = batch_stride_bias,
+        .batch_stride_o = batch_stride_o,
+        .batch_stride_randval = 0,
+        .batch_stride_do = batch_stride_do,
+        .batch_stride_lsed = batch_stride_lse,
+        .batch_stride_dq = batch_stride_dq,
+        .batch_stride_dk = batch_stride_dk,
+        .batch_stride_dv = batch_stride_dv,
+        .batch_stride_dbias = batch_stride_dbias,
+        .window_size_left = mask.left,
+        .window_size_right = mask.right,
+        .mask_type = static_cast<ck_tile::index_t>(mask.type),
+        .p_drop = p_dropout,
+        .p_undrop = p_undrop,
+        .drop_seed_offset = drop_seed_offset};
 }
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor, at::Tensor>
@@ -415,7 +436,14 @@ mha_varlen_bwd_ck(const at::Tensor &dout,                   // total_q x num_hea
                                           is_dropout,
                                           attn_bias_.has_value(),
                                           deterministic,
-                                          bias_requires_grad);
+                                          bias_requires_grad,
+                                          batch_size,
+                                          max_seqlen_q,
+                                          max_seqlen_k,
+                                          num_heads,
+                                          num_heads_k,
+                                          static_cast<int>(q.size(0)),
+                                          static_cast<int>(k.size(0)));
 
         auto args =
             get_ck_fmha_varlen_bwd_args(
